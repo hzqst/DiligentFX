@@ -546,9 +546,10 @@ public:
         PSO_FLAG_ENABLE_TONE_MAPPING       = PSO_FLAG_BIT(35),
         PSO_FLAG_UNSHADED                  = PSO_FLAG_BIT(36),
         PSO_FLAG_COMPUTE_MOTION_VECTORS    = PSO_FLAG_BIT(37),
-        PSO_FLAG_ENABLE_SHADOWS            = PSO_FLAG_BIT(38),
+        PSO_FLAG_ENABLE_SHADOWS                = PSO_FLAG_BIT(38),
+        PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE = PSO_FLAG_BIT(39),
 
-        PSO_FLAG_LAST = PSO_FLAG_ENABLE_SHADOWS,
+        PSO_FLAG_LAST = PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE,
 
         PSO_FLAG_FIRST_USER_DEFINED = PSO_FLAG_LAST << 1ull,
 
@@ -731,6 +732,8 @@ public:
                            ITextureView*           pShadowMap                 = nullptr) const;
 
     void SetMaterialTexture(IShaderResourceBinding* pSRB, ITextureView* pTexSRV, TEXTURE_ATTRIB_ID TextureId) const;
+
+    void SetTransmissionSceneColor(IShaderResourceBinding* pSRB, ITextureView* pSceneColorSRV) const;
 
     void SetOITResources(IShaderResourceBinding* pSRB, const OITResources& OITResources) const;
 
