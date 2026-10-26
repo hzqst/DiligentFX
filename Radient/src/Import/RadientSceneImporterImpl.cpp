@@ -1,0 +1,229 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "Import/RadientSceneImporterImpl.hpp"
+
+#include "Assets/RadientAssetManagerImpl.hpp"
+#include "Import/RadientSceneInstantiation.hpp"
+
+#include "Cast.hpp"
+#include "Errors.hpp"
+
+#include <utility>
+
+namespace Diligent
+{
+
+RadientSceneImporterImpl::RadientSceneImporterImpl(IReferenceCounters*   pRefCounters,
+                                                   IRadientAssetManager* pAssetManager,
+                                                   IRadientSceneWriter*  pWriter) :
+    TBase{pRefCounters},
+    m_pAssetManager{pAssetManager},
+    m_pWriter{pWriter}
+{
+}
+
+RadientSceneImporterImpl::~RadientSceneImporterImpl()
+{
+}
+
+RefCntAutoPtr<IRadientSceneImporter> RadientSceneImporterImpl::Create(IRadientAssetManager* pAssetManager,
+                                                                      IRadientSceneWriter*  pWriter)
+{
+    return RefCntAutoPtr<RadientSceneImporterImpl>{MakeNewRCObj<RadientSceneImporterImpl>()(pAssetManager, pWriter)};
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::ImportScene(const RadientSceneLoadInfo&        LoadInfo,
+                                                     const RadientSceneInstantiateInfo& InstantiateInfo,
+                                                     IRadientSceneAsset**               ppScene,
+                                                     RadientEntityID&                   RootEntity)
+{
+    if (ppScene == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    DEV_CHECK_ERR(*ppScene == nullptr, "Output scene pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+    *ppScene   = nullptr;
+    RootEntity = InvalidRadientEntityID;
+
+    if (m_pAssetManager == nullptr)
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    const RADIENT_STATUS RegistryStatus = ValidateAnimationRegistry(InstantiateInfo.pAnimationRegistry);
+    if (RADIENT_FAILED(RegistryStatus))
+        return RegistryStatus;
+
+    RefCntAutoPtr<IRadientSceneAsset> pScene;
+    const RADIENT_STATUS              LoadStatus = m_pAssetManager->LoadScene(LoadInfo, &pScene);
+    if (RADIENT_FAILED(LoadStatus))
+        return LoadStatus;
+
+    const RADIENT_STATUS Status = InstantiateScene(pScene, InstantiateInfo, RootEntity);
+    *ppScene                    = pScene.Detach();
+    return Status;
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::InstantiateScene(IRadientSceneAsset*                pModel,
+                                                          const RadientSceneInstantiateInfo& InstantiateInfo,
+                                                          RadientEntityID&                   RootEntity)
+{
+    RootEntity = InvalidRadientEntityID;
+
+    if (m_pWriter == nullptr)
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    if (pModel == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    const RADIENT_STATUS RegistryStatus = ValidateAnimationRegistry(InstantiateInfo.pAnimationRegistry);
+    if (RADIENT_FAILED(RegistryStatus))
+        return RegistryStatus;
+
+    const RADIENT_STATUS LoadStatus = RadientAssetManagerImpl::GetSceneLoadStatus(pModel);
+    if (RADIENT_FAILED(LoadStatus))
+        return LoadStatus;
+
+    RADIENT_STATUS Status = CreateSceneRoot(pModel, InstantiateInfo, RootEntity);
+    if (RADIENT_FAILED(Status))
+        return Status;
+
+    if (LoadStatus == RADIENT_STATUS_PENDING)
+    {
+        AddPendingSceneInstantiation(pModel, InstantiateInfo, RootEntity);
+        return RADIENT_STATUS_PENDING;
+    }
+
+    Status = PopulateSceneRoot(pModel, InstantiateInfo.SceneIndex, RootEntity,
+                               InstantiateInfo.pAnimationRegistry);
+    if (RADIENT_FAILED(Status))
+    {
+        m_pWriter->DestroyEntity(RootEntity);
+        RootEntity = InvalidRadientEntityID;
+    }
+
+    return Status;
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::ProcessPendingImports()
+{
+    if (m_PendingSceneInstantiations.empty())
+        return RADIENT_STATUS_OK;
+
+    if (m_pWriter == nullptr || m_pAssetManager == nullptr)
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    RADIENT_STATUS Result = RADIENT_STATUS_OK;
+
+    for (size_t Index = 0; Index < m_PendingSceneInstantiations.size();)
+    {
+        const PendingSceneInstantiation& Pending = m_PendingSceneInstantiations[Index];
+
+        const RADIENT_STATUS LoadStatus = RadientAssetManagerImpl::GetSceneLoadStatus(Pending.pModel);
+        if (LoadStatus == RADIENT_STATUS_PENDING)
+        {
+            Result = Result == RADIENT_STATUS_OK ? RADIENT_STATUS_PENDING : Result;
+            ++Index;
+            continue;
+        }
+
+        RADIENT_STATUS Status = LoadStatus;
+        if (!RADIENT_FAILED(Status))
+            Status = PopulateSceneRoot(Pending.pModel, Pending.SceneIndex, Pending.RootEntity,
+                                       Pending.pAnimationRegistry);
+
+        if (RADIENT_FAILED(Status))
+            m_pWriter->DestroyEntity(Pending.RootEntity);
+
+        if (RADIENT_FAILED(Status) && !RADIENT_FAILED(Result))
+            Result = Status;
+
+        if (Index + 1 < m_PendingSceneInstantiations.size())
+            m_PendingSceneInstantiations[Index] = std::move(m_PendingSceneInstantiations.back());
+        m_PendingSceneInstantiations.pop_back();
+    }
+
+    return Result;
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::ValidateAnimationRegistry(IRadientAnimationRegistry* pAnimationRegistry) const
+{
+    if (pAnimationRegistry == nullptr)
+        return RADIENT_STATUS_OK;
+
+    if (m_pWriter == nullptr || pAnimationRegistry->GetScene() != m_pWriter->GetScene())
+    {
+        LOG_ERROR_MESSAGE("The animation registry and scene writer must reference the same scene");
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    }
+
+    return RADIENT_STATUS_OK;
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::CreateSceneRoot(IRadientSceneAsset*                pModel,
+                                                         const RadientSceneInstantiateInfo& InstantiateInfo,
+                                                         RadientEntityID&                   RootEntity)
+{
+    RootEntity = InvalidRadientEntityID;
+
+    if (m_pWriter == nullptr)
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    RadientEntityDesc RootDesc{};
+    RootDesc.Name      = InstantiateInfo.Name != nullptr ? InstantiateInfo.Name : pModel->GetReference().URI;
+    RootDesc.Parent    = InstantiateInfo.Parent;
+    RootDesc.Flags     = InstantiateInfo.RootFlags;
+    RootDesc.Transform = InstantiateInfo.RootTransform;
+
+    return m_pWriter->CreateEntity(RootDesc, RootEntity);
+}
+
+RADIENT_STATUS RadientSceneImporterImpl::PopulateSceneRoot(IRadientSceneAsset*        pModel,
+                                                           Uint32                     SceneIndex,
+                                                           RadientEntityID            RootEntity,
+                                                           IRadientAnimationRegistry* pAnimationRegistry)
+{
+    if (m_pWriter == nullptr)
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    const RadientImport::ImportedDocument* pImportedScene = RadientAssetManagerImpl::GetImportedScene(pModel);
+    if (pImportedScene == nullptr)
+        return RADIENT_STATUS_FAILED;
+
+    return RadientImport::InstantiateSceneGraph(*pImportedScene, SceneIndex, *m_pWriter, RootEntity, pAnimationRegistry);
+}
+
+void RadientSceneImporterImpl::AddPendingSceneInstantiation(IRadientSceneAsset*                pModel,
+                                                            const RadientSceneInstantiateInfo& InstantiateInfo,
+                                                            RadientEntityID                    RootEntity)
+{
+    PendingSceneInstantiation Pending;
+    Pending.pModel             = pModel;
+    Pending.pAnimationRegistry = InstantiateInfo.pAnimationRegistry;
+    Pending.SceneIndex         = InstantiateInfo.SceneIndex;
+    Pending.RootEntity         = RootEntity;
+
+    m_PendingSceneInstantiations.emplace_back(std::move(Pending));
+}
+
+} // namespace Diligent

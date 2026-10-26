@@ -1,5 +1,5 @@
 /*
- *  Copyright 2024-2025 Diligent Graphics LLC
+ *  Copyright 2024-2026 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -345,7 +345,7 @@ void ScreenSpaceAmbientOcclusion::PrepareResources(IRenderDevice* pDevice, IDevi
     }
 }
 
-void ScreenSpaceAmbientOcclusion::Execute(const RenderAttributes& RenderAttribs)
+POST_FX_EXECUTION_STATUS ScreenSpaceAmbientOcclusion::Execute(const RenderAttributes& RenderAttribs)
 {
     DEV_CHECK_ERR(RenderAttribs.pDevice != nullptr, "RenderAttribs.pDevice must not be null");
     DEV_CHECK_ERR(RenderAttribs.pDeviceContext != nullptr, "RenderAttribs.pDeviceContext must not be null");
@@ -358,9 +358,11 @@ void ScreenSpaceAmbientOcclusion::Execute(const RenderAttributes& RenderAttribs)
     m_Resources.Insert(RESOURCE_IDENTIFIER_INPUT_DEPTH, RenderAttribs.pDepthBufferSRV->GetTexture());
     m_Resources.Insert(RESOURCE_IDENTIFIER_INPUT_NORMAL, RenderAttribs.pNormalBufferSRV->GetTexture());
 
+    m_Algorithm = static_cast<ALGORITHM_TYPE>(RenderAttribs.pSSAOAttribs->Algorithm);
+
     ScopedDebugGroup DebugGroupGlobal{RenderAttribs.pDeviceContext, "ScreenSpaceAmbientOcclusion"};
 
-    bool AllPSOsReady = PrepareShadersAndPSO(RenderAttribs) && RenderAttribs.pPostFXContext->IsPSOsReady();
+    const bool AllPSOsReady = PrepareShadersAndPSO(RenderAttribs) && RenderAttribs.pPostFXContext->IsPSOsReady();
     UpdateConstantBuffer(RenderAttribs, !AllPSOsReady);
 
     if (AllPSOsReady)
@@ -382,13 +384,17 @@ void ScreenSpaceAmbientOcclusion::Execute(const RenderAttributes& RenderAttribs)
     // Release references to input resources
     for (Uint32 ResourceIdx = 0; ResourceIdx <= RESOURCE_IDENTIFIER_INPUT_LAST; ++ResourceIdx)
         m_Resources[ResourceIdx].Release();
+
+    return AllPSOsReady ?
+        POST_FX_EXECUTION_STATUS_READY :
+        POST_FX_EXECUTION_STATUS_PENDING;
 }
 
 bool ScreenSpaceAmbientOcclusion::UpdateUI(HLSL::ScreenSpaceAmbientOcclusionAttribs& SSAOAttribs, FEATURE_FLAGS& FeatureFlags)
 {
-    const char* AlgorithmTypeNames[] = {"GTAO", "HBAO"};
+    const char* AlgorithmTypeNames[] = {"GTAO", "HBAO", "VBAO"};
 
-    int  AlgorithmType             = (FeatureFlags & FEATURE_FLAG_UNIFORM_WEIGHTING) != 0 ? 1 : 0;
+    int  AlgorithmType             = SSAOAttribs.Algorithm;
     bool FeatureHalfResolution     = (FeatureFlags & FEATURE_FLAG_HALF_RESOLUTION) != 0;
     bool FeatureHalfPrecisionDepth = (FeatureFlags & FEATURE_FLAG_HALF_PRECISION_DEPTH) != 0;
 
@@ -396,7 +402,17 @@ bool ScreenSpaceAmbientOcclusion::UpdateUI(HLSL::ScreenSpaceAmbientOcclusionAttr
 
     if (ImGui::Combo("Algorithm", &AlgorithmType, AlgorithmTypeNames, _countof(AlgorithmTypeNames)))
         AttribsChanged = true;
-    ImGui::HelpMarker("GTAO uses a cosine-weighted sum to calculate AO. In the HBAO, the contribution from all directions is uniform weighted");
+    ImGui::HelpMarker("GTAO uses a cosine-weighted sum to calculate AO. HBAO weights the contribution from all directions uniformly. "
+                      "VBAO (Visibility Bitmask) encodes the occlusion of 32 hemisphere sectors per slice, accounting for a constant "
+                      "occluder thickness so that light can pass behind thin geometry such as fences and foliage");
+    SSAOAttribs.Algorithm = AlgorithmType;
+
+    if (AlgorithmType == static_cast<int>(ALGORITHM_TYPE_VBAO))
+    {
+        if (ImGui::SliderFloat("Bitmask Thickness", &SSAOAttribs.BitmaskThickness, 0.05f, 2.0f))
+            AttribsChanged = true;
+        ImGui::HelpMarker("View-space occluder thickness used by VBAO. Larger values let more light pass behind thin surfaces");
+    }
 
     if (ImGui::SliderFloat("Effect Radius", &SSAOAttribs.EffectRadius, 0.0f, 10.0f))
         AttribsChanged = true;
@@ -438,7 +454,6 @@ bool ScreenSpaceAmbientOcclusion::UpdateUI(HLSL::ScreenSpaceAmbientOcclusionAttr
             FeatureFlags &= ~Flag;
     };
 
-    ResetStateFeatureMask(FeatureFlags, FEATURE_FLAG_UNIFORM_WEIGHTING, AlgorithmType == 1);
     ResetStateFeatureMask(FeatureFlags, FEATURE_FLAG_HALF_RESOLUTION, FeatureHalfResolution);
     ResetStateFeatureMask(FeatureFlags, FEATURE_FLAG_HALF_PRECISION_DEPTH, FeatureHalfPrecisionDepth);
 
@@ -459,9 +474,13 @@ bool ScreenSpaceAmbientOcclusion::PrepareShadersAndPSO(const RenderAttributes& R
     ShaderMacroHelper Macros;
     Macros.Add("SSAO_OPTION_INVERTED_DEPTH", m_UseReverseDepth);
     Macros.Add("SUPPORTED_SHADER_SRV", SupportedFeatures.TextureSubresourceViews);
-    Macros.Add("SSAO_OPTION_UNIFORM_WEIGHTING", (m_FeatureFlags & FEATURE_FLAG_UNIFORM_WEIGHTING) != 0);
     Macros.Add("SSAO_OPTION_HALF_RESOLUTION", (m_FeatureFlags & FEATURE_FLAG_HALF_RESOLUTION) != 0);
     Macros.Add("SSAO_OPTION_HALF_PRECISION_DEPTH", (m_FeatureFlags & FEATURE_FLAG_HALF_PRECISION_DEPTH) != 0);
+
+    // SSAO_ALGORITHM affects only the ambient-occlusion shader. Keep it out of the shared macro set
+    // so the other passes do not get algorithm-specific shader/PSO variants.
+    ShaderMacroHelper AmbientOcclusionMacros = Macros;
+    AmbientOcclusionMacros.Add("SSAO_ALGORITHM", static_cast<int>(m_Algorithm));
 
     bool AllPSOsReady = true;
 
@@ -551,7 +570,7 @@ bool ScreenSpaceAmbientOcclusion::PrepareShadersAndPSO(const RenderAttributes& R
             RefCntAutoPtr<IShader> PS = PostFXRenderTechnique::CreateShader(
                 RenderAttribs.pDevice, RenderAttribs.pStateCache,
                 "SSAO_ComputeAmbientOcclusion.fx", "ComputeAmbientOcclusionPS",
-                SHADER_TYPE_PIXEL, Macros, ShaderFlags);
+                SHADER_TYPE_PIXEL, AmbientOcclusionMacros, ShaderFlags);
 
             PipelineResourceLayoutDescX ResourceLayout;
             ResourceLayout
@@ -777,7 +796,7 @@ void ScreenSpaceAmbientOcclusion::UpdateConstantBuffer(const RenderAttributes& R
     if (ResetTimer)
         m_FrameTimer.Restart();
 
-    float Alpha = std::min(std::max(m_FrameTimer.GetElapsedTimef(), 0.0f), 1.0f);
+    const float Alpha = RenderAttribs.pPostFXContext->GetTransitionAlpha(m_FrameTimer.GetElapsedTimef());
 
     bool ResetAccumulation =
         m_LastFrameIdx == ~0u ||                            // No history on the first frame
@@ -1315,7 +1334,9 @@ void ScreenSpaceAmbientOcclusion::ComputeSpatialReconstruction(const RenderAttri
 
 ScreenSpaceAmbientOcclusion::RenderTechnique& ScreenSpaceAmbientOcclusion::GetRenderTechnique(RENDER_TECH RenderTech)
 {
-    return m_RenderTech[{RenderTech, m_FeatureFlags, m_UseReverseDepth}];
+    // Only the ambient-occlusion pass is specialized by algorithm; the other passes can reuse their PSOs.
+    const ALGORITHM_TYPE Algorithm = RenderTech == RENDER_TECH_COMPUTE_AMBIENT_OCCLUSION ? m_Algorithm : ALGORITHM_TYPE_GTAO;
+    return m_RenderTech[{RenderTech, m_FeatureFlags, Algorithm, m_UseReverseDepth}];
 }
 
 } // namespace Diligent

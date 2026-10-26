@@ -121,6 +121,10 @@ public:
         SURFACE_FLAGS SurfaceFlags = SURFACE_FLAG_ALL;
 
         /// Copied linear HDR scene color texture used by transmission composite.
+        /// Render opaque surfaces and the background before copying this texture.
+        /// If null, scene-color transmission compositing is disabled.
+        /// Requires EnableTransmission and both PSO_FLAG_ENABLE_TRANSMISSION
+        /// and PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE in Flags.
         ITextureView* pTransmissionSceneColorSRV = nullptr;
 
         /// Optional camera position used to sort transmissive surfaces back-to-front.
@@ -220,12 +224,19 @@ public:
     ///                             internal objects.
     /// \param [in] CacheUseInfo  - GLTF resource cache usage information.
     /// \param [in] pFrameAttribs - Frame attributes constant buffer to set in the SRB.
+    /// \param [in] pIrradianceCubeSRV    - Irradiance cube map shader resource view to set in the SRB.
+    /// \param [in] pPrefilteredEnvMapSRV - Prefiltered environment map shader resource view to set in the SRB.
+    /// \param [in] pPrefilteredSheenEnvMapSRV - View-averaged Charlie environment map.
+    ///                                        Null uses the generic environment-map fallback.
     /// \param [out] ppCacheSRB   - Pointer to memory location where the pointer to the SRB object
     ///                             will be written.
     void CreateResourceCacheSRB(IRenderDevice*           pDevice,
                                 IDeviceContext*          pCtx,
                                 ResourceCacheUseInfo&    CacheUseInfo,
                                 IBuffer*                 pFrameAttribs,
+                                ITextureView*            pIrradianceCubeSRV,
+                                ITextureView*            pPrefilteredEnvMapSRV,
+                                ITextureView*            pPrefilteredSheenEnvMapSRV,
                                 IShaderResourceBinding** ppCacheSRB);
 
     /// Prepares the renderer for rendering objects.
@@ -240,33 +251,46 @@ public:
                IDeviceContext*        pCtx,
                ResourceCacheUseInfo&  CacheUseInfo,
                ResourceCacheBindings& Bindings,
-               IBuffer*               pFrameAttribs);
+               IBuffer*               pFrameAttribs,
+               ITextureView*          pIrradianceCubeSRV         = nullptr,
+               ITextureView*          pPrefilteredEnvMapSRV      = nullptr,
+               ITextureView*          pPrefilteredSheenEnvMapSRV = nullptr);
 
     struct PBRPrimitiveShaderAttribsData
     {
-        PSO_FLAGS       PSOFlags             = PSO_FLAG_NONE;
-        const float4x4* NodeMatrix           = nullptr;
-        const float4x4* PrevNodeMatrix       = nullptr; // #if COMPUTE_MOTION_VECTORS
-        Uint32          JointCount           = 0;
-        Uint32          FirstJoint           = 0;
-        const float3*   PosScale             = nullptr;
-        const float3*   PosBias              = nullptr;
-        const float4x4* SkinPreTransform     = nullptr; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM
-        const float4x4* PrevSkinPreTransform = nullptr; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
-        const float4*   FallbackColor        = nullptr;
-        const void*     CustomData           = nullptr;
-        size_t          CustomDataSize       = 0;
+        PSO_FLAGS                       PSOFlags                   = PSO_FLAG_NONE;
+        const float4x4*                 NodeMatrix                 = nullptr;
+        const float4x4*                 PrevNodeMatrix             = nullptr; // #if COMPUTE_MOTION_VECTORS
+        Uint32                          JointCount                 = 0;
+        Uint32                          FirstJoint                 = 0; // #if USE_JOINTS
+        Uint32                          PrevFirstJoint             = 0; // #if USE_JOINTS && COMPUTE_MOTION_VECTORS
+        const float3*                   PosScale                   = nullptr;
+        const float3*                   PosBias                    = nullptr;
+        const float4x4*                 SkinPreTransform           = nullptr; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM
+        const float4x4*                 PrevSkinPreTransform       = nullptr; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
+        Uint32                          MorphTargetVertexOffset    = 0;       // #if USE_MORPH_TARGETS
+        const MorphTargetShaderAttribs* pActiveMorphTargets        = nullptr; // #if USE_MORPH_TARGETS
+        Uint32                          ActiveMorphTargetCount     = 0;
+        const MorphTargetShaderAttribs* pPrevActiveMorphTargets    = nullptr; // #if USE_MORPH_TARGETS && COMPUTE_MOTION_VECTORS
+        Uint32                          PrevActiveMorphTargetCount = 0;
+        const float4*                   FallbackColor              = nullptr;
+        const void*                     CustomData                 = nullptr;
+        size_t                          CustomDataSize             = 0;
     };
     static void* WritePBRPrimitiveShaderAttribs(void*                                pDstShaderAttribs,
                                                 const PBRPrimitiveShaderAttribsData& AttribsData,
                                                 bool                                 TransposeMatrices,
-                                                bool                                 UseSkinPreTransform);
+                                                bool                                 UseSkinPreTransform,
+                                                VERTEX_POS_PACK_MODE                 VertexPosPackMode,
+                                                Uint32                               MaxActiveMorphTargetCount);
 
     struct PBRMaterialShaderAttribsData
     {
         PSO_FLAGS                                       PSOFlags = PSO_FLAG_NONE;
         const std::array<int, TEXTURE_ATTRIB_ID_COUNT>& TextureAttribIndices;
         const GLTF::Material&                           Material;
+        /// Number of mip levels exposed by the copied scene color view.
+        Uint32 TransmissionSceneColorMipCount = 1;
     };
     static void* WritePBRMaterialShaderAttribs(void*                               pDstShaderAttribs,
                                                const PBRMaterialShaderAttribsData& AttribsData);
@@ -284,7 +308,9 @@ public:
     static void WritePBRLightShaderAttribs(const PBRLightShaderAttribsData& AttribsData,
                                            HLSL::PBRLightAttribs*           pShaderAttribs);
 
-    PSO_FLAGS GetMaterialPSOFlags(const GLTF::Material& Mat) const;
+    /// Returns the PSO features required by the GLTF material. Renderer
+    /// configuration can be applied with PBR_Renderer::GetEnabledPSOFlags().
+    static PSO_FLAGS GetMaterialPSOFlags(const GLTF::Material& Material);
 
 private:
     static ALPHA_MODE GltfAlphaModeToAlphaMode(GLTF::Material::ALPHA_MODE GltfAlphaMode);

@@ -46,6 +46,10 @@
 #ifndef ENABLE_SHEEN
 #   define ENABLE_SHEEN 0
 #endif
+
+#ifndef ENABLE_SPECULAR
+#   define ENABLE_SPECULAR 0
+#endif
     
 #ifndef ENABLE_ANISOTROPY
 #   define ENABLE_ANISOTROPY 0
@@ -75,8 +79,44 @@
 #   define USE_JOINTS 0
 #endif
 
+#ifndef USE_MORPH_TARGETS
+#   define USE_MORPH_TARGETS 0
+#endif
+
+#ifndef MAX_ACTIVE_MORPH_TARGET_COUNT
+#   define MAX_ACTIVE_MORPH_TARGET_COUNT 0
+#endif
+
 #ifndef USE_SKIN_PRE_TRANSFORM
 #   define USE_SKIN_PRE_TRANSFORM 0
+#endif
+
+struct GLTFNodeSkinningShaderAttribs
+{
+    int JointCount;
+    int FirstJoint;     // Index of the first joint in the joints buffer to start from
+    int PrevFirstJoint; // Index of the first previous-frame joint
+    int Padding;
+
+#if USE_SKIN_PRE_TRANSFORM
+    float4x4 PreTransform;
+#   if COMPUTE_MOTION_VECTORS
+        float4x4 PrevPreTransform;
+#   endif
+#endif
+};
+#ifdef CHECK_STRUCT_ALIGNMENT
+	CHECK_STRUCT_ALIGNMENT(GLTFNodeSkinningShaderAttribs);
+#endif
+
+struct PBRVertexPositionUnpackShaderAttribs
+{
+    // Scale and bias unpack the position before applying the node matrix.
+    float4 Bias;  // xyz used; w is padding
+    float4 Scale; // xyz used; w is padding
+};
+#ifdef CHECK_STRUCT_ALIGNMENT
+	CHECK_STRUCT_ALIGNMENT(PBRVertexPositionUnpackShaderAttribs);
 #endif
 
 // When updating this structure, make sure to update GLTF_PBR_Renderer::WritePBRPrimitiveShaderAttribs,
@@ -88,25 +128,41 @@ struct GLTFNodeShaderTransforms
     float4x4 PrevNodeMatrix;
 #endif
 
-	int   JointCount;
-    int   FirstJoint; // Index of the first joint in the joints buffer to start from
-    float PosBiasX;   // Bias to apply to the position
-    float PosBiasY;
-    
-    float PosBiasZ;   // Scale and bias are used to unpack
-    float PosScaleX;  // position (Pos = Pos * PosScale + PosBias)
-    float PosScaleY;  // and are applied before the NodeMatrix.
-    float PosScaleZ;
-    
-#if USE_JOINTS && USE_SKIN_PRE_TRANSFORM
-    float4x4 SkinPreTransform;
-#   if COMPUTE_MOTION_VECTORS
-        float4x4 PrevSkinPreTransform;
-#   endif
+#if USE_JOINTS
+    GLTFNodeSkinningShaderAttribs Skinning;
 #endif
 };
 #ifdef CHECK_STRUCT_ALIGNMENT
 	CHECK_STRUCT_ALIGNMENT(GLTFNodeShaderTransforms);
+#endif
+
+struct PBRMorphTargetShaderAttribs
+{
+    float Weight;
+    uint  PositionDeltaOffset;
+    uint  NormalDeltaOffset;
+    uint  TangentDeltaOffset;
+};
+#ifdef CHECK_STRUCT_ALIGNMENT
+    CHECK_STRUCT_ALIGNMENT(PBRMorphTargetShaderAttribs);
+#endif
+
+#if USE_MORPH_TARGETS
+struct PBRMorphTargetsShaderAttribs
+{
+    uint VertexOffset; // Subtracted from SV_VertexID to address target-local deltas
+    uint Padding0;
+    uint Padding1;
+    uint Padding2;
+
+    PBRMorphTargetShaderAttribs Targets[MAX_ACTIVE_MORPH_TARGET_COUNT];
+#   if COMPUTE_MOTION_VECTORS
+        PBRMorphTargetShaderAttribs PrevTargets[MAX_ACTIVE_MORPH_TARGET_COUNT];
+#   endif
+};
+#   ifdef CHECK_STRUCT_ALIGNMENT
+        CHECK_STRUCT_ALIGNMENT(PBRMorphTargetsShaderAttribs);
+#   endif
 #endif
 
 struct LoadingAnimationShaderParameters
@@ -131,6 +187,10 @@ struct PBRRendererShaderParameters
 	float PrefilteredCubeLastMip; // Prefiltered cube map last mip level
 
 	float4 IBLScale;
+
+    // Cosine and sine of the environment rotation around the positive Y axis.
+    float2 EnvironmentRotation;
+    float2 Padding1;
 
     float OcclusionStrength;
     float EmissionScale;
@@ -193,6 +253,17 @@ struct PBRMaterialSheenAttribs
 	CHECK_STRUCT_ALIGNMENT(PBRMaterialSheenAttribs);
 #endif
 
+struct PBRMaterialSpecularAttribs
+{
+    float ColorFactorR;
+    float ColorFactorG;
+    float ColorFactorB;
+    float Factor;
+};
+#ifdef CHECK_STRUCT_ALIGNMENT
+	CHECK_STRUCT_ALIGNMENT(PBRMaterialSpecularAttribs);
+#endif
+
 struct PBRMaterialAnisotropyAttribs
 {
     float Strength;
@@ -219,7 +290,7 @@ struct PBRMaterialTransmissionAttribs
 {
     float Factor;
     float IOR;
-    float Padding1;
+    float SceneColorMaxMip;
     float Padding2;
 };
 #ifdef CHECK_STRUCT_ALIGNMENT
@@ -274,12 +345,22 @@ INLINE uint UnpackPBRMaterialTextureWrapVMode(uint PackedProps)
     return ((PackedProps >> 6u) & 7u) + 1u;
 }
 
+INLINE uint UnpackPBRMaterialTextureMipLevelCount(uint PackedProps)
+{
+    // See GLTF::Material::TextureShaderAttribs::SetMipLevelCount.
+    return (PackedProps >> 9u) & 15u;
+}
+
 struct PBRMaterialShaderInfo
 {
     PBRMaterialBasicAttribs Basic;
     
 #if ENABLE_SHEEN
     PBRMaterialSheenAttribs Sheen;
+#endif
+
+#if ENABLE_SPECULAR
+    PBRMaterialSpecularAttribs Specular;
 #endif
     
 #if ENABLE_ANISOTROPY

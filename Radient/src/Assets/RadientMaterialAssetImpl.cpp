@@ -1,0 +1,698 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "Assets/RadientMaterialAssetFactory.hpp"
+#include "Assets/RadientMaterialStorage.hpp"
+
+#include "RadientMaterialAssetImplBase.hpp"
+
+#include "Assets/RadientAssetStatus.hpp"
+#include "Assets/RadientMaterialAssetManager.hpp"
+#include "Assets/RadientMaterialDefinitionImpl.hpp"
+#include "Assets/RadientTextureAssetManager.hpp"
+#include "DebugUtilities.hpp"
+#include "EngineMemory.h"
+#include "FixedLinearAllocator.hpp"
+#include "ObjectBase.hpp"
+
+#include <atomic>
+#include <cstring>
+#include <exception>
+#include <utility>
+#include <vector>
+
+namespace Diligent
+{
+
+namespace RadientMaterialDetail
+{
+
+struct PackedMaterialData::MaterialParameterValue
+{
+    RADIENT_MATERIAL_PARAMETER_TYPE Type = RADIENT_MATERIAL_PARAMETER_TYPE_UNKNOWN;
+    // Size is the byte size for value parameters and the element count for textures.
+    Uint32 Size  = 0;
+    void*  pData = nullptr;
+    // Last shader-data version that changed this parameter, including any array element.
+    Uint64 Version = 1;
+};
+
+PackedMaterialData::~PackedMaterialData()
+{
+    for (Uint32 ValueIndex = 0; ValueIndex < m_ValueCount; ++ValueIndex)
+    {
+        const MaterialParameterValue& Value = m_pValues[ValueIndex];
+        if (!IsTextureParameter(Value.Type))
+            continue;
+
+        TexturePtr* const pTextures = static_cast<TexturePtr*>(Value.pData);
+        for (Uint32 TextureIndex = 0; TextureIndex < Value.Size; ++TextureIndex)
+            pTextures[TextureIndex].~TexturePtr();
+    }
+}
+
+Uint32 PackedMaterialData::GetValueCount() const noexcept
+{
+    return m_ValueCount;
+}
+
+RADIENT_MATERIAL_PARAMETER_TYPE PackedMaterialData::GetValueType(Uint32 Index) const noexcept
+{
+    return GetValue(Index).Type;
+}
+
+Uint32 PackedMaterialData::GetValueSize(Uint32 Index) const noexcept
+{
+    return GetValue(Index).Size;
+}
+
+const void* PackedMaterialData::GetValueData(Uint32 Index) const noexcept
+{
+    return GetValue(Index).pData;
+}
+
+Uint64 PackedMaterialData::GetValueVersion(Uint32 Index) const noexcept
+{
+    return GetValue(Index).Version;
+}
+
+bool PackedMaterialData::HasSameValue(Uint32 Index, const void* pData) const noexcept
+{
+    const MaterialParameterValue& Value = GetValue(Index);
+    VERIFY_EXPR(!IsTextureParameter(Value.Type));
+    return std::memcmp(Value.pData, pData, Value.Size) == 0;
+}
+
+void PackedMaterialData::CopyValue(Uint32 Index, const void* pData, Uint64 ShaderDataVersion) noexcept
+{
+    MaterialParameterValue& Value = GetValue(Index);
+    VERIFY_EXPR(!IsTextureParameter(Value.Type));
+    std::memcpy(Value.pData, pData, Value.Size);
+    Value.Version = ShaderDataVersion;
+}
+
+bool PackedMaterialData::UpdateValueRange(Uint32 Index, Uint32 Offset, const void* pData, Uint32 Size, Uint64 ShaderDataVersion) noexcept
+{
+    MaterialParameterValue& Value = GetValue(Index);
+    VERIFY_EXPR(!IsTextureParameter(Value.Type));
+    VERIFY_EXPR(pData != nullptr && Size != 0 && Offset <= Value.Size && Size <= Value.Size - Offset);
+    Uint8* const pDestination = static_cast<Uint8*>(Value.pData) + Offset;
+    if (std::memcmp(pDestination, pData, Size) == 0)
+        return false;
+
+    std::memcpy(pDestination, pData, Size);
+    Value.Version = ShaderDataVersion;
+    return true;
+}
+
+IRadientTextureAsset* PackedMaterialData::GetTexture(Uint32 Index, Uint32 ArrayIndex) const noexcept
+{
+    const MaterialParameterValue& Value = GetValue(Index);
+    VERIFY_EXPR(IsTextureParameter(Value.Type) && ArrayIndex < Value.Size);
+    return static_cast<const TexturePtr*>(Value.pData)[ArrayIndex];
+}
+
+void PackedMaterialData::SetTexture(Uint32                Index,
+                                    Uint32                ArrayIndex,
+                                    IRadientTextureAsset* pTexture,
+                                    Uint64                ShaderDataVersion) noexcept
+{
+    MaterialParameterValue& Value = GetValue(Index);
+    VERIFY_EXPR(IsTextureParameter(Value.Type) && ArrayIndex < Value.Size);
+    static_cast<TexturePtr*>(Value.pData)[ArrayIndex] = pTexture;
+    Value.Version                                     = ShaderDataVersion;
+}
+
+PackedMaterialData::MaterialParameterValue& PackedMaterialData::GetValue(Uint32 Index) noexcept
+{
+    VERIFY_EXPR(Index < m_ValueCount);
+    return m_pValues[Index];
+}
+
+const PackedMaterialData::MaterialParameterValue& PackedMaterialData::GetValue(Uint32 Index) const noexcept
+{
+    VERIFY_EXPR(Index < m_ValueCount);
+    return m_pValues[Index];
+}
+
+PackedMaterialData::PackedMaterialData(const RadientMaterialDefinitionDesc& Desc)
+{
+    FixedLinearAllocator Allocator{GetRawAllocator()};
+    Allocator.AddSpace<MaterialParameterValue>(Desc.ParameterCount);
+    for (Uint32 Index = 0; Index < Desc.ParameterCount; ++Index)
+    {
+        const RadientMaterialParameterDesc& Parameter = Desc.pParameters[Index];
+
+        Uint32     DataSize;
+        const bool IsValidDataSize = GetMaterialParameterDataSize(Parameter, DataSize);
+        VERIFY_EXPR(IsValidDataSize);
+        (void)IsValidDataSize;
+
+        if (IsTextureParameter(Parameter.Type))
+            Allocator.AddSpace<TexturePtr>(Parameter.ArraySize);
+        else
+            Allocator.AddSpace(DataSize, alignof(Uint32));
+    }
+
+    Allocator.Reserve();
+    const size_t MemorySize = Allocator.GetReservedSize();
+    m_Memory                = decltype(m_Memory){Allocator.ReleaseOwnership(), STDDeleterRawMem<void>{GetRawAllocator()}};
+
+    FixedLinearAllocator Writer{m_Memory.get(), MemorySize};
+    m_pValues = Writer.ConstructArray<MaterialParameterValue>(Desc.ParameterCount);
+
+    for (Uint32 Index = 0; Index < Desc.ParameterCount; ++Index)
+    {
+        const RadientMaterialParameterDesc& Parameter = Desc.pParameters[Index];
+
+        MaterialParameterValue& Value = m_pValues[Index];
+        Value.Type                    = Parameter.Type;
+
+        Uint32     DataSize;
+        const bool IsValidDataSize = GetMaterialParameterDataSize(Parameter, DataSize);
+        VERIFY_EXPR(IsValidDataSize);
+        (void)IsValidDataSize;
+
+        if (IsTextureParameter(Parameter.Type))
+        {
+            auto* const pTextures = Writer.ConstructArray<TexturePtr>(Parameter.ArraySize);
+            Value.pData           = pTextures;
+            Value.Size            = Parameter.ArraySize;
+            ++m_ValueCount;
+
+            if (Parameter.ArraySize == 1)
+            {
+                pTextures[0] = Parameter.pDefaultTexture;
+            }
+        }
+        else
+        {
+            Value.pData = Writer.Allocate(DataSize, alignof(Uint32));
+            Value.Size  = DataSize;
+            ++m_ValueCount;
+
+            if (Parameter.pDefaultValue != nullptr)
+            {
+                std::memcpy(Value.pData, Parameter.pDefaultValue, Value.Size);
+            }
+            else
+            {
+                std::memset(Value.pData, 0, Value.Size);
+            }
+        }
+    }
+
+    VERIFY_EXPR(m_ValueCount == Desc.ParameterCount);
+    if (Writer.GetReservedSize() != 0)
+        VERIFY_EXPR(Writer.GetCurrentSize() <= Writer.GetReservedSize());
+}
+
+namespace
+{
+
+struct MaterialTextureSource
+{
+    Uint32                              ParameterIndex = ~Uint32{0};
+    Uint32                              ArrayIndex     = 0;
+    RefCntAutoPtr<IRadientTextureAsset> pFallbackTexture;
+
+    IRadientTextureAsset* GetRequestedTexture(const PackedMaterialData& Data) const noexcept
+    {
+        return Data.GetTexture(ParameterIndex, ArrayIndex);
+    }
+
+    IRadientTextureAsset* GetRenderTexture(const PackedMaterialData& Data) const noexcept
+    {
+        IRadientTextureAsset* const pRequestedTexture = GetRequestedTexture(Data);
+        if (pRequestedTexture != nullptr &&
+            RADIENT_SUCCEEDED(RadientTextureAssetManager::GetLoadStatus(pRequestedTexture)))
+        {
+            return pRequestedTexture;
+        }
+
+        return pFallbackTexture != nullptr ? pFallbackTexture.RawPtr() : pRequestedTexture;
+    }
+
+    RADIENT_STATUS GetRenderTextureLoadStatus(const PackedMaterialData& Data) const noexcept
+    {
+        IRadientTextureAsset* const pRequestedTexture = GetRequestedTexture(Data);
+        if (pRequestedTexture != nullptr)
+        {
+            const RADIENT_STATUS RequestedStatus =
+                RadientTextureAssetManager::GetLoadStatus(pRequestedTexture);
+            if (RADIENT_SUCCEEDED(RequestedStatus) || pFallbackTexture == nullptr)
+                return RequestedStatus;
+        }
+
+        return pFallbackTexture != nullptr ?
+            RadientTextureAssetManager::GetLoadStatus(pFallbackTexture) :
+            RADIENT_STATUS_OK;
+    }
+};
+
+} // namespace
+
+struct MaterialStorage::TextureState
+{
+    // Texture assignments are frozen by the first status or view query, so
+    // shader-only edits do not invalidate terminal statuses or the finalized view.
+    using TextureSourceArray = std::vector<MaterialTextureSource>;
+    using TextureEntryArray  = std::vector<RadientMaterialTextureEntry>;
+    using TextureIndexArray  = std::vector<Uint32>;
+
+    explicit TextureState(MaterialStorage& Storage) :
+        Storage{Storage}
+    {
+        const RadientMaterialDefinitionDesc& Desc = Storage.m_pDefinition->GetDesc();
+        TextureSources.reserve(Desc.ParameterCount);
+        TextureIndexByParameter.resize(Desc.ParameterCount, RadientMaterialAssetView::InvalidTextureIndex);
+
+        for (Uint32 ParameterIndex = 0; ParameterIndex < Desc.ParameterCount; ++ParameterIndex)
+        {
+            const RadientMaterialParameterDesc& ParameterDesc = Desc.pParameters[ParameterIndex];
+            if (ParameterDesc.Type != RADIENT_MATERIAL_PARAMETER_TYPE_TEXTURE)
+                continue;
+
+            TextureIndexByParameter[ParameterIndex] = static_cast<Uint32>(TextureSources.size());
+            for (Uint32 ArrayIndex = 0; ArrayIndex < ParameterDesc.ArraySize; ++ArrayIndex)
+            {
+                MaterialTextureSource Source;
+                Source.ParameterIndex   = ParameterIndex;
+                Source.ArrayIndex       = ArrayIndex;
+                Source.pFallbackTexture = ParameterDesc.pDefaultTexture;
+                TextureSources.push_back(std::move(Source));
+            }
+        }
+
+        // Allocate the selected entries up front so pending status queries only
+        // read dependencies and fill existing storage. Entries become immutable
+        // when LoadStatus publishes OK.
+        TextureEntries.resize(TextureSources.size());
+        for (size_t Index = 0; Index < TextureSources.size(); ++Index)
+        {
+            TextureEntries[Index].ParameterIndex = TextureSources[Index].ParameterIndex;
+            TextureEntries[Index].ArrayIndex     = TextureSources[Index].ArrayIndex;
+        }
+
+        const RADIENT_STATUS InitialStatus =
+            TextureSources.empty() ? RADIENT_STATUS_OK : RADIENT_STATUS_PENDING;
+        LoadStatus.store(InitialStatus, std::memory_order_relaxed);
+        GPUResourceStatus.store(InitialStatus, std::memory_order_relaxed);
+    }
+
+    RADIENT_STATUS GetLoadStatus() const noexcept
+    {
+        RADIENT_STATUS Status = LoadStatus.load(std::memory_order_acquire);
+        if (Status != RADIENT_STATUS_PENDING)
+            return Status;
+
+        // Only one query scans the requested textures. Other queries return
+        // immediately, without waiting for the scan or taking the data mutex.
+        if (LoadStatusScanInProgress.test_and_set(std::memory_order_acquire))
+            return LoadStatus.load(std::memory_order_acquire);
+
+        // Another scanner may have published OK after our first status read.
+        // Recheck before touching m_Data: the render thread may already have
+        // applied fallbacks and released the original requested textures.
+        Status = LoadStatus.load(std::memory_order_acquire);
+        if (Status == RADIENT_STATUS_PENDING)
+        {
+            Status = RADIENT_STATUS_OK;
+            for (const MaterialTextureSource& Source : TextureSources)
+            {
+                Status = CombineDependencyStatus(
+                    Status,
+                    Source.GetRenderTextureLoadStatus(Storage.m_Data));
+            }
+
+            if (Status == RADIENT_STATUS_OK)
+            {
+                for (size_t Index = 0; Index < TextureSources.size(); ++Index)
+                    TextureEntries[Index].pTexture = TextureSources[Index].GetRenderTexture(Storage.m_Data);
+            }
+
+            // Publish the complete selection before allowing finalization to
+            // replace m_Data textures. No scanner reads those slots afterward;
+            // GPU status queries use only the immutable selected entries.
+            if (Status != RADIENT_STATUS_PENDING)
+                LoadStatus.store(Status, std::memory_order_release);
+        }
+
+        LoadStatusScanInProgress.clear(std::memory_order_release);
+        return Status;
+    }
+
+    RADIENT_STATUS GetGPUResourceStatus() const noexcept
+    {
+        const RADIENT_STATUS Status = GetLoadStatus();
+        if (Status != RADIENT_STATUS_OK)
+            return Status;
+
+        RADIENT_STATUS GPUStatus = GPUResourceStatus.load(std::memory_order_acquire);
+        if (GPUStatus != RADIENT_STATUS_PENDING)
+            return GPUStatus;
+
+        GPUStatus = RADIENT_STATUS_OK;
+        for (const RadientMaterialTextureEntry& Texture : TextureEntries)
+        {
+            IRadientTextureAsset* const pTexture = Texture.pTexture;
+            if (pTexture == nullptr)
+                continue;
+
+            GPUStatus = CombineDependencyStatus(
+                GPUStatus,
+                RadientTextureAssetManager::GetGPUResourceStatus(pTexture));
+        }
+
+        if (GPUStatus != RADIENT_STATUS_PENDING)
+            GPUResourceStatus.store(GPUStatus, std::memory_order_release);
+        return GPUStatus;
+    }
+
+    RADIENT_STATUS ApplyTextureSelection()
+    {
+        if (TextureSelectionApplied)
+            return RADIENT_STATUS_OK;
+
+        const RADIENT_STATUS Status = GetLoadStatus();
+        if (Status != RADIENT_STATUS_OK)
+            return Status;
+
+        bool StateChanged = false;
+        for (const RadientMaterialTextureEntry& Texture : TextureEntries)
+        {
+            if (Texture.pTexture != Storage.m_Data.GetTexture(Texture.ParameterIndex, Texture.ArrayIndex))
+            {
+                Storage.m_Data.SetTexture(
+                    Texture.ParameterIndex,
+                    Texture.ArrayIndex,
+                    Texture.pTexture,
+                    Storage.m_ChangeVersions.ShaderDataVersion + 1);
+                StateChanged = true;
+            }
+        }
+
+        TextureSelectionApplied = true;
+        if (StateChanged)
+        {
+            Storage.PublishChange(MATERIAL_CHANGE_FLAG_SHADER_DATA |
+                                  MATERIAL_CHANGE_FLAG_TEXTURE_BINDINGS);
+        }
+        return RADIENT_STATUS_OK;
+    }
+
+    MaterialStorage&                    Storage;
+    bool                                TextureSelectionApplied = false;
+    mutable std::atomic<RADIENT_STATUS> LoadStatus{RADIENT_STATUS_OK};
+    mutable std::atomic<RADIENT_STATUS> GPUResourceStatus{RADIENT_STATUS_OK};
+    mutable std::atomic_flag            LoadStatusScanInProgress = ATOMIC_FLAG_INIT;
+    TextureSourceArray                  TextureSources;
+    TextureIndexArray                   TextureIndexByParameter;
+    mutable TextureEntryArray           TextureEntries;
+};
+
+MaterialStorage::MaterialStorage(IRadientMaterialDefinitionAsset* pDefinition,
+                                 RadientHandle                    DefinitionHandle,
+                                 const MaterialAssetIdentity&     Identity) :
+    m_pDefinition{pDefinition},
+    m_DefinitionHandle{DefinitionHandle},
+    m_Identity{Identity},
+    m_Data{pDefinition->GetDesc()},
+    m_pTextureState{std::make_unique<TextureState>(*this)}
+{
+    VERIFY_EXPR(m_Identity.pChangeTracker != nullptr);
+    VERIFY_EXPR(m_Identity.ID != InvalidMaterialID);
+}
+
+MaterialStorage::~MaterialStorage() = default;
+
+IRadientMaterialDefinitionAsset* MaterialStorage::GetDefinition() const noexcept
+{
+    return m_pDefinition;
+}
+
+Uint64 MaterialStorage::GetVersion() const noexcept
+{
+    return m_ChangeVersions.Version;
+}
+
+const MaterialAssetIdentity& MaterialStorage::GetIdentity() const noexcept
+{
+    return m_Identity;
+}
+
+const MaterialChangeVersions& MaterialStorage::GetChangeVersions() const noexcept
+{
+    return m_ChangeVersions;
+}
+
+RADIENT_STATUS MaterialStorage::GetParameter(RadientMaterialParameterHandle Handle,
+                                             void*                          pData,
+                                             Uint32                         DataSize) const
+{
+    if (!IsValidHandle(Handle))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    if (IsTextureParameter(m_Data.GetValueType(Handle.Index)))
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    if (pData == nullptr || DataSize != m_Data.GetValueSize(Handle.Index))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    std::memcpy(pData, m_Data.GetValueData(Handle.Index), DataSize);
+    return RADIENT_STATUS_OK;
+}
+
+RADIENT_STATUS MaterialStorage::GetTexture(RadientMaterialParameterHandle Handle,
+                                           Uint32                         ArrayIndex,
+                                           IRadientTextureAsset**         ppTexture) const
+{
+    if (ppTexture == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    *ppTexture = nullptr;
+
+    if (!IsValidHandle(Handle))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    if (!IsTextureParameter(m_Data.GetValueType(Handle.Index)))
+        return RADIENT_STATUS_INVALID_OPERATION;
+
+    if (ArrayIndex >= m_Data.GetValueSize(Handle.Index))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    *ppTexture = m_Data.GetTexture(Handle.Index, ArrayIndex);
+    if (*ppTexture != nullptr)
+        (*ppTexture)->AddRef();
+    return RADIENT_STATUS_OK;
+}
+
+RADIENT_STATUS MaterialStorage::GetLoadStatus() const noexcept
+{
+    FinishInitialization();
+    return m_pTextureState->GetLoadStatus();
+}
+
+RADIENT_STATUS MaterialStorage::GetGPUResourceStatus() const noexcept
+{
+    FinishInitialization();
+    return m_pTextureState->GetGPUResourceStatus();
+}
+
+RadientMaterialAssetView MaterialStorage::GetMaterialView(IRadientMaterialAsset* pMaterial)
+{
+    FinishInitialization();
+    // Finalizing fallbacks can replace texture values read by shader packing.
+    std::lock_guard<std::mutex> Lock{m_DataMutex};
+    if (pMaterial == nullptr || m_pTextureState->ApplyTextureSelection() != RADIENT_STATUS_OK)
+        return {};
+
+    return {
+        pMaterial,
+        m_pTextureState->TextureEntries.data(),
+        static_cast<Uint32>(m_pTextureState->TextureEntries.size()),
+        m_pTextureState->TextureIndexByParameter.data(),
+        static_cast<Uint32>(m_pTextureState->TextureIndexByParameter.size()),
+    };
+}
+
+MaterialStorage::ReadAccess::ReadAccess(const MaterialStorage& Storage) :
+    m_Storage{Storage},
+    m_Lock{Storage.m_DataMutex}
+{}
+
+const PackedMaterialData& MaterialStorage::ReadAccess::GetPackedData() const noexcept
+{
+    VERIFY_EXPR(m_Lock.owns_lock());
+    return m_Storage.m_Data;
+}
+
+Uint64 MaterialStorage::ReadAccess::GetShaderDataVersion() const noexcept
+{
+    VERIFY_EXPR(m_Lock.owns_lock());
+    return m_Storage.m_ChangeVersions.ShaderDataVersion;
+}
+
+Uint64 MaterialStorage::ReadAccess::GetSurfaceShaderDataVersion() const noexcept
+{
+    VERIFY_EXPR(m_Lock.owns_lock());
+    return m_Storage.m_SurfaceShaderDataVersion;
+}
+
+MaterialStorage::ReadAccess MaterialStorage::AcquireReadAccess() const
+{
+    return ReadAccess{*this};
+}
+
+bool MaterialStorage::IsValidHandle(RadientMaterialParameterHandle Handle) const noexcept
+{
+    return Handle.Definition == m_DefinitionHandle &&
+        Handle.Index < m_Data.GetValueCount() &&
+        Handle.Reserved == 0;
+}
+
+void MaterialStorage::FinishInitialization() const noexcept
+{
+    if (!IsInitializationFinished())
+    {
+        std::lock_guard<std::mutex> Lock{m_DataMutex};
+        m_InitializationFinished.store(true, std::memory_order_release);
+    }
+}
+
+RADIENT_STATUS MaterialStorage::ApplyAnimationUpdates(const MaterialParameterUpdate* pUpdates,
+                                                      Uint32                         UpdateCount,
+                                                      Float32*                       pAlphaCutoff,
+                                                      const Float32*                 pNewAlphaCutoff) noexcept
+{
+    VERIFY_EXPR(pUpdates != nullptr || UpdateCount == 0);
+    VERIFY_EXPR(pNewAlphaCutoff == nullptr || pAlphaCutoff != nullptr);
+    std::lock_guard<std::mutex> Lock{m_DataMutex};
+
+    MATERIAL_CHANGE_FLAGS Flags             = MATERIAL_CHANGE_FLAG_NONE;
+    const Uint64          ShaderDataVersion = m_ChangeVersions.ShaderDataVersion + 1;
+    for (Uint32 Index = 0; Index < UpdateCount; ++Index)
+    {
+        const MaterialParameterUpdate& Update = pUpdates[Index];
+        if (m_Data.UpdateValueRange(Update.ParameterIndex, Update.Offset, Update.pData, Update.Size, ShaderDataVersion))
+            Flags |= MATERIAL_CHANGE_FLAG_SHADER_DATA;
+    }
+
+    MATERIAL_CHANGE_FLAGS SurfaceFlags = MATERIAL_CHANGE_FLAG_NONE;
+    if (pNewAlphaCutoff != nullptr && *pAlphaCutoff != *pNewAlphaCutoff)
+    {
+        *pAlphaCutoff = *pNewAlphaCutoff;
+        SurfaceFlags  = MATERIAL_CHANGE_FLAG_SHADER_DATA;
+        Flags |= SurfaceFlags;
+    }
+    if (Flags == MATERIAL_CHANGE_FLAG_NONE)
+        return RADIENT_STATUS_NO_CHANGE;
+
+    PublishChange(Flags, SurfaceFlags);
+    return RADIENT_STATUS_OK;
+}
+
+void MaterialStorage::PublishChange(MATERIAL_CHANGE_FLAGS Flags, MATERIAL_CHANGE_FLAGS SurfaceFlags) noexcept
+{
+    VERIFY_EXPR(Flags != MATERIAL_CHANGE_FLAG_NONE);
+
+    ++m_ChangeVersions.Version;
+    if ((Flags & MATERIAL_CHANGE_FLAG_SHADER_DATA) != 0)
+        ++m_ChangeVersions.ShaderDataVersion;
+    if ((SurfaceFlags & MATERIAL_CHANGE_FLAG_SHADER_DATA) != 0)
+        m_SurfaceShaderDataVersion = m_ChangeVersions.ShaderDataVersion;
+    if ((Flags & MATERIAL_CHANGE_FLAG_TEXTURE_BINDINGS) != 0)
+        ++m_ChangeVersions.TextureBindingsVersion;
+    if ((Flags & MATERIAL_CHANGE_FLAG_RENDER_STATE) != 0)
+        ++m_ChangeVersions.RenderStateVersion;
+
+    m_Identity.pChangeTracker->RecordChange();
+}
+
+} // namespace RadientMaterialDetail
+
+namespace
+{
+
+using namespace RadientMaterialDetail;
+
+class RadientMaterialAssetImpl;
+class RadientMaterialWriterImpl;
+
+using RadientMaterialAssetImplBase =
+    MaterialAssetImplBase<RadientMaterialAssetImpl,
+                          IRadientMaterialAsset,
+                          IID_RadientMaterialAsset>;
+
+class RadientMaterialAssetImpl final : public RadientMaterialAssetImplBase
+{
+public:
+    using TBase = RadientMaterialAssetImplBase;
+    using TBase::TBase;
+
+    RefCntAutoPtr<RadientMaterialWriterImpl> MakeWriter();
+};
+
+using RadientMaterialWriterImplBase =
+    MaterialWriterImplBase<RadientMaterialWriterImpl,
+                           IRadientMaterialWriter,
+                           IID_RadientMaterialWriter,
+                           RadientMaterialAssetImpl>;
+
+class RadientMaterialWriterImpl final : public RadientMaterialWriterImplBase
+{
+public:
+    using TBase = RadientMaterialWriterImplBase;
+    using TBase::TBase;
+};
+
+RefCntAutoPtr<RadientMaterialWriterImpl> RadientMaterialAssetImpl::MakeWriter()
+{
+    return RefCntAutoPtr<RadientMaterialWriterImpl>{
+        MakeNewRCObj<RadientMaterialWriterImpl>()(this)};
+}
+
+} // namespace
+
+RefCntAutoPtr<IRadientMaterialAsset> RadientMaterialDetail::MakeGenericMaterialAsset(
+    IRadientMaterialDefinitionAsset* pDefinition,
+    RadientHandle                    DefinitionHandle,
+    const MaterialAssetIdentity&     Identity)
+{
+    return RefCntAutoPtr<RadientMaterialAssetImpl>{MakeNewRCObj<RadientMaterialAssetImpl>()(pDefinition, DefinitionHandle, Identity)};
+}
+
+RadientMaterialDetail::MaterialStorage* RadientMaterialDetail::TryGetMaterialStorage(
+    IRadientAsset* pAsset) noexcept
+{
+    RefCntAutoPtr<IMaterialStorageProvider> pStorageProvider{pAsset, IID_MaterialStorageProvider};
+    return pStorageProvider != nullptr ? &pStorageProvider->GetStorage() : nullptr;
+}
+
+const RadientMaterialDetail::MaterialStorage* RadientMaterialDetail::TryGetMaterialStorage(
+    const IRadientAsset* pAsset) noexcept
+{
+    return TryGetMaterialStorage(const_cast<IRadientAsset*>(pAsset));
+}
+
+} // namespace Diligent

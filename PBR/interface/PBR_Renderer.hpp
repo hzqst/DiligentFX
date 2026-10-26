@@ -85,6 +85,8 @@ public:
         TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS,
         TEXTURE_ATTRIB_ID_TRANSMISSION,
         TEXTURE_ATTRIB_ID_THICKNESS,
+        TEXTURE_ATTRIB_ID_SPECULAR,
+        TEXTURE_ATTRIB_ID_SPECULAR_COLOR,
         TEXTURE_ATTRIB_ID_COUNT
     };
 
@@ -139,6 +141,38 @@ public:
         VERTEX_POS_PACK_MODE_64_BIT,
     };
 
+    static constexpr Uint32 InvalidMorphTargetDataOffset = ~Uint32{0};
+
+    /// One morph target selected for the active target palette.
+    struct ActiveMorphTarget
+    {
+        Uint32  TargetIndex = 0;
+        Float32 Weight      = 0;
+    };
+
+    /// Shader-readable data for one active morph target.
+    ///
+    /// Each referenced stream contains one tightly packed Float32 triplet per
+    /// vertex. Delta offsets are measured in Float32 elements in the structured
+    /// morph target buffer. InvalidMorphTargetDataOffset indicates that the
+    /// target does not provide the corresponding attribute.
+    struct MorphTargetShaderAttribs
+    {
+        Float32 Weight              = 0;
+        Uint32  PositionDeltaOffset = InvalidMorphTargetDataOffset;
+        Uint32  NormalDeltaOffset   = InvalidMorphTargetDataOffset;
+        Uint32  TangentDeltaOffset  = InvalidMorphTargetDataOffset;
+    };
+
+    /// Selects up to MaxActiveTargetCount nonzero weights with the greatest
+    /// absolute magnitude. The result is sorted by descending magnitude, with
+    /// lower target indices ordered first when magnitudes are equal. Signed
+    /// weights are preserved.
+    static Uint32 SelectActiveMorphTargets(const Float32*     pWeights,
+                                           Uint32             WeightCount,
+                                           ActiveMorphTarget* pActiveTargets,
+                                           Uint32             MaxActiveTargetCount) noexcept;
+
     /// Renderer create info
     struct CreateInfo
     {
@@ -161,6 +195,10 @@ public:
         /// Whether to enable sheen.
         /// A pipeline state can use sheen only if this flag is set to true.
         bool EnableSheen = false;
+
+        /// Whether to enable dielectric specular modulation.
+        /// A pipeline state can use specular material parameters only if this flag is set to true.
+        bool EnableSpecular = false;
 
         /// Whether to enable anisotropy.
         /// A pipeline state can use anisotropy only if this flag is set to true.
@@ -190,6 +228,15 @@ public:
         ///             - Default normal map
         ///             - Default physical description map
         bool CreateDefaultTextures = true;
+
+        /// Whether to create a default joints buffer when pJointsBuffer is null.
+        /// Disable this when joint data is supplied through renderer-specific SRBs.
+        bool CreateDefaultJointsBuffer = true;
+
+        /// Whether to create a default morph target buffer when
+        /// pMorphTargetBuffer is null. Disable this when morph target data is
+        /// supplied through renderer-specific SRBs.
+        bool CreateDefaultMorphTargetBuffer = true;
 
         /// Whether to enable shadows.
         /// A pipeline state can use shadows only if this flag is set to true.
@@ -233,8 +280,8 @@ public:
         ///
         /// \remarks    This parameter is ignored if ShaderTexturesArrayMode is SHADER_TEXTURE_ARRAY_MODE_NONE.
         ///             If this parameter is set to 0, the renderer will define the array size.
-        ///             If it is not zero, the client should provide the GetStaticShaderTextureIds
-        ///             callback function to define texture indices.
+        ///             If it is not zero and ShaderTexturesArrayMode is SHADER_TEXTURE_ARRAY_MODE_STATIC,
+        ///             the client should provide static texture indices in PSOKey.
         Uint32 MaterialTexturesArraySize = 0;
 
         /// The size of the shader primitive array.
@@ -274,6 +321,9 @@ public:
         /// Immutable sampler for sheen texture.
         SamplerDesc SheenMapImmutableSampler = DefaultSampler;
 
+        /// Immutable sampler for specular textures.
+        SamplerDesc SpecularMapImmutableSampler = DefaultSampler;
+
         /// Immutable sampler for anisotropy texture.
         SamplerDesc AnisotropyMapImmutableSampler = DefaultSampler;
 
@@ -291,18 +341,17 @@ public:
         /// If set to 0, the animation will be disabled.
         Uint32 MaxJointCount = 64;
 
+        /// Maximum number of morph targets blended by a draw.
+        ///
+        /// The value determines the size of the per-primitive morph palette
+        /// and bounds vertex shader work. Set to zero to disable morph targets.
+        Uint32 MaxActiveMorphTargetCount = 4;
+
         /// Joints buffer mode.
         JOINTS_BUFFER_MODE JointsBufferMode = JOINTS_BUFFER_MODE_UNIFORM;
 
         /// The number of samples for BRDF LUT creation.
         Uint32 NumBRDFSamples = 512;
-
-        /// If Sheen is enabled, this parameter specifies the path to the sheen look-up table.
-        const char* SheenAlbedoScalingLUTPath = nullptr;
-
-        /// If IBL and Sheen are enabled, this parameter specifies the path to the
-        /// preintegrated Charlie BRDF look-up table.
-        const char* PreintegratedCharlieBRDFPath = nullptr;
 
         /// Input layout description.
         ///
@@ -318,6 +367,7 @@ public:
         ///                     float4 Weight0 : ATTRIB5; // If PSO_FLAG_USE_JOINTS is set
         ///                     float4 Color   : ATTRIB6; // If PSO_FLAG_USE_VERTEX_COLORS is set
         ///                     float3 Tangent : ATTRIB7; // If PSO_FLAG_USE_VERTEX_TANGENTS is set
+        ///                     uint VertexID  : SV_VertexID; // If PSO_FLAG_USE_MORPH_TARGETS is set
         ///                 };
         InputLayoutDesc InputLayout;
 
@@ -353,16 +403,6 @@ public:
         /// will use the default implementation.
         std::function<PSMainSourceInfo(PSO_FLAGS PsoFlags)> GetPSMainSource = nullptr;
 
-        /// An optional user-provided callback function that returns static material texture indices
-        /// for the specified PSO key. If null, the renderer will assign the indices automatically.
-        ///
-        /// \remarks    This function is called only if ShaderTexturesArrayMode is set SHADER_TEXTURE_ARRAY_MODE_STATIC.
-        ///
-        ///             The main usage scenario for this function is to implement "static" bindless
-        ///             mode, where texture indices are assigned at shader compile time and hard-coded
-        ///             into PSO. The client can use the Key.UserValue to identify the shader indices.
-        std::function<StaticShaderTextureIdsArrayType(const PSOKey& Key)> GetStaticShaderTextureIds = nullptr;
-
         /// A pointer to the user-provided primitive attribs buffer.
         /// If null, the renderer will allocate the buffer.
         IBuffer* pPrimitiveAttribsCB = nullptr;
@@ -372,8 +412,14 @@ public:
         IBuffer* pMaterialAttribsCB = nullptr;
 
         /// A pointer to the user-provided joints buffer.
-        /// If null, the renderer will allocate the buffer.
+        /// If null and CreateDefaultJointsBuffer is true, the renderer will
+        /// allocate the buffer.
         IBuffer* pJointsBuffer = nullptr;
+
+        /// A pointer to the user-provided morph target buffer.
+        /// If null and CreateDefaultMorphTargetBuffer is true, the renderer
+        /// will allocate a minimal fallback buffer.
+        IBuffer* pMorphTargetBuffer = nullptr;
 
         /// Texture attribute index info
         std::array<int, TEXTURE_ATTRIB_ID_COUNT> TextureAttribIndices{};
@@ -437,6 +483,8 @@ public:
         Sheen,
         SheenColor,
         SheenRoughness,
+        SpecularFactor,
+        SpecularColorFactor,
         AnisotropyStrength,
         AnisotropyDirection,
         Iridescence,
@@ -474,27 +522,102 @@ public:
     virtual ~PBR_Renderer();
 
     // clang-format off
-    IRenderDevice* GetDevice() const               { return m_Device; }
-    ITextureView* GetIrradianceCubeSRV() const     { return m_pIrradianceCubeSRV; }
-    ITextureView* GetPrefilteredEnvMapSRV() const  { return m_pPrefilteredEnvMapSRV; }
-    ITextureView* GetPreintegratedGGX_SRV() const  { return m_pPreintegratedGGX_SRV; }
-    ITextureView* GetWhiteTexSRV() const           { return m_pWhiteTexSRV; }
-    ITextureView* GetBlackTexSRV() const           { return m_pBlackTexSRV; }
-    ITextureView* GetDefaultNormalMapSRV() const   { return m_pDefaultNormalMapSRV; }
-    IBuffer*      GetPBRPrimitiveAttribsCB() const {return m_PBRPrimitiveAttribsCB;}
-    IBuffer*      GetPBRMaterialAttribsCB() const  {return m_PBRMaterialAttribsCB;}
-    IBuffer*      GetJointsBuffer() const          {return m_JointsBuffer;}
+    IRenderDevice* GetDevice() const                 { return m_Device; }
+    ITextureView* GetPreintegratedGGX_SRV() const    { return m_pPreintegratedGGX_SRV; }
+    ITextureView* GetPreintegratedSheen_SRV() const  { return m_pPreintegratedSheen_SRV; }
+    ITextureView* GetWhiteTexSRV() const             { return m_pWhiteTexSRV; }
+    ITextureView* GetBlackTexSRV() const             { return m_pBlackTexSRV; }
+    ITextureView* GetDefaultNormalMapSRV() const     { return m_pDefaultNormalMapSRV; }
+    IBuffer*      GetPBRPrimitiveAttribsCB() const   { return m_PBRPrimitiveAttribsCB; }
+    IBuffer*      GetPBRMaterialAttribsCB() const    { return m_PBRMaterialAttribsCB; }
+    IBuffer*      GetJointsBuffer() const            { return m_JointsBuffer; }
+    IBuffer*      GetMorphTargetBuffer() const       { return m_MorphTargetBuffer; }
     // clang-format on
+
+    static constexpr TEXTURE_FORMAT PrefilteredEnvMapFmt = TEX_FORMAT_RGBA16_FLOAT;
+    static constexpr TEXTURE_FORMAT IrradianceCubeFmt    = TEX_FORMAT_RGBA16_FLOAT;
+    static constexpr Uint32         IrradianceCubeDim    = 64;
+    static constexpr Uint32         PrefilteredEnvMapDim = 256;
+
+    /// Returns a texture description for an irradiance cube map.
+    static TextureDesc GetIrradianceCubeDesc(const char*    Name      = "Irradiance cube map",
+                                             TEXTURE_FORMAT Format    = IrradianceCubeFmt,
+                                             Uint32         Dimension = IrradianceCubeDim);
+
+    /// Returns a texture description for a prefiltered environment map.
+    static TextureDesc GetPrefilteredEnvMapDesc(const char*    Name      = "Prefiltered environment map",
+                                                TEXTURE_FORMAT Format    = PrefilteredEnvMapFmt,
+                                                Uint32         Dimension = PrefilteredEnvMapDim);
+
+    /// Creates and clears an irradiance cube map. pClearColor points to four
+    /// floating-point components; null clears the map to zero.
+    RefCntAutoPtr<ITexture> CreateIrradianceCube(IDeviceContext* pCtx,
+                                                 const char*     Name        = "Irradiance cube map",
+                                                 TEXTURE_FORMAT  Format      = IrradianceCubeFmt,
+                                                 Uint32          Dimension   = IrradianceCubeDim,
+                                                 const float*    pClearColor = nullptr) const;
+
+    /// Creates and clears a prefiltered environment map. pClearColor points to
+    /// four floating-point components; null clears the map to zero.
+    RefCntAutoPtr<ITexture> CreatePrefilteredEnvMap(IDeviceContext* pCtx,
+                                                    const char*     Name        = "Prefiltered environment map",
+                                                    TEXTURE_FORMAT  Format      = PrefilteredEnvMapFmt,
+                                                    Uint32          Dimension   = PrefilteredEnvMapDim,
+                                                    const float*    pClearColor = nullptr) const;
+
+    struct PrecomputeCubemapsAttribs
+    {
+        /// Source environment map shader resource view.
+        ITextureView* pEnvironmentMapSRV = nullptr;
+
+        /// Output irradiance cube map texture.
+        ITexture* pIrradianceCube = nullptr;
+
+        /// Output prefiltered environment map texture.
+        ITexture* pPrefilteredEnvMap = nullptr;
+
+        /// Optional output environment map for the normalized, view-averaged
+        /// Charlie BRDF. Runtime sheen samples this map by the surface normal.
+        /// A non-null output requires CreateInfo::EnableSheen to be true.
+        ITexture* pPrefilteredSheenEnvMap = nullptr;
+
+        /// Number of samples for diffuse irradiance precomputation.
+        /// If 0, the renderer will choose the optimal number of samples.
+        Uint32 NumDiffuseSamples = 0;
+
+        /// Number of samples for specular prefiltering.
+        /// If 0, the renderer will choose the optimal number of samples.
+        Uint32 NumSpecularSamples = 0;
+
+        /// Whether to optimize samples.
+        bool OptimizeSamples = true;
+
+        /// UV scale and bias used to address a spherical environment map in
+        /// its backing texture. The identity transform samples the full image.
+        float4 EnvironmentMapUVScaleBias = {1.f, 1.f, 0.f, 0.f};
+
+        /// Array slice containing a spherical environment map. Ignored for
+        /// Texture2D and cube source views.
+        float EnvironmentMapSlice = 0.f;
+
+        /// Logical spherical environment map dimensions and usable mip count.
+        /// Zero values use the source texture description.
+        Uint32 EnvironmentMapWidth     = 0;
+        Uint32 EnvironmentMapHeight    = 0;
+        Uint32 EnvironmentMapMipLevels = 0;
+
+        /// Whether row 0 of a spherical environment map represents the
+        /// negative Y direction. Ignored for cube source views.
+        bool SphereMapRow0IsNegativeY = false;
+    };
 
     /// Precompute cubemaps used by IBL.
     ///
-    /// \remarks If NumDiffuseSamples or NumSpecularSamples is 0,
-    ///          the renderer will choose the optimal number of samples.
-    void PrecomputeCubemaps(IDeviceContext* pCtx,
-                            ITextureView*   pEnvMapSRV,
-                            Uint32          NumDiffuseSamples  = 0,
-                            Uint32          NumSpecularSamples = 0,
-                            bool            OptimizeSamples    = true);
+    /// \remarks Output textures must be cube textures with render target and shader
+    ///          resource bind flags. See GetIrradianceCubeDesc() and
+    ///          GetPrefilteredEnvMapDesc().
+    void PrecomputeCubemaps(IDeviceContext*                  pCtx,
+                            const PrecomputeCubemapsAttribs& Attribs);
 
     void CreateResourceBinding(IShaderResourceBinding** ppSRB, Uint32 Idx = 0) const;
 
@@ -520,34 +643,71 @@ public:
         PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP = PSO_FLAG_BIT(TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS),
         PSO_FLAG_USE_TRANSMISSION_MAP          = PSO_FLAG_BIT(TEXTURE_ATTRIB_ID_TRANSMISSION),
         PSO_FLAG_USE_THICKNESS_MAP             = PSO_FLAG_BIT(TEXTURE_ATTRIB_ID_THICKNESS),
+        PSO_FLAG_USE_SPECULAR_MAP              = PSO_FLAG_BIT(TEXTURE_ATTRIB_ID_SPECULAR),
+        PSO_FLAG_USE_SPECULAR_COLOR_MAP        = PSO_FLAG_BIT(TEXTURE_ATTRIB_ID_SPECULAR_COLOR),
 
-        PSO_FLAG_LAST_TEXTURE = PSO_FLAG_USE_THICKNESS_MAP,
+        PSO_FLAG_LAST_TEXTURE = PSO_FLAG_USE_SPECULAR_COLOR_MAP,
         PSO_FLAG_ALL_TEXTURES = PSO_FLAG_LAST_TEXTURE * 2ull - 1ull,
 
-        PSO_FLAG_USE_VERTEX_COLORS   = PSO_FLAG_BIT(17),
-        PSO_FLAG_USE_VERTEX_NORMALS  = PSO_FLAG_BIT(18),
-        PSO_FLAG_USE_VERTEX_TANGENTS = PSO_FLAG_BIT(19),
-        PSO_FLAG_USE_TEXCOORD0       = PSO_FLAG_BIT(20),
-        PSO_FLAG_USE_TEXCOORD1       = PSO_FLAG_BIT(21),
-        PSO_FLAG_USE_JOINTS          = PSO_FLAG_BIT(22),
-        PSO_FLAG_ENABLE_CLEAR_COAT   = PSO_FLAG_BIT(23),
-        PSO_FLAG_ENABLE_SHEEN        = PSO_FLAG_BIT(24),
-        PSO_FLAG_ENABLE_ANISOTROPY   = PSO_FLAG_BIT(25),
-        PSO_FLAG_ENABLE_IRIDESCENCE  = PSO_FLAG_BIT(26),
-        PSO_FLAG_ENABLE_TRANSMISSION = PSO_FLAG_BIT(27),
-        PSO_FLAG_ENABLE_VOLUME       = PSO_FLAG_BIT(28),
+        PSO_FLAG_USE_VERTEX_COLORS   = PSO_FLAG_BIT(19),
+        PSO_FLAG_USE_VERTEX_NORMALS  = PSO_FLAG_BIT(20),
+        PSO_FLAG_USE_VERTEX_TANGENTS = PSO_FLAG_BIT(21),
+        PSO_FLAG_USE_TEXCOORD0       = PSO_FLAG_BIT(22),
+        PSO_FLAG_USE_TEXCOORD1       = PSO_FLAG_BIT(23),
+        PSO_FLAG_USE_JOINTS          = PSO_FLAG_BIT(24),
+        PSO_FLAG_ENABLE_CLEAR_COAT   = PSO_FLAG_BIT(25),
+        PSO_FLAG_ENABLE_SHEEN        = PSO_FLAG_BIT(26),
+        PSO_FLAG_ENABLE_ANISOTROPY   = PSO_FLAG_BIT(27),
+        PSO_FLAG_ENABLE_IRIDESCENCE  = PSO_FLAG_BIT(28),
+        PSO_FLAG_ENABLE_TRANSMISSION = PSO_FLAG_BIT(29),
+        PSO_FLAG_ENABLE_VOLUME       = PSO_FLAG_BIT(30),
+        PSO_FLAG_ENABLE_SPECULAR     = PSO_FLAG_BIT(31),
 
-        PSO_FLAG_USE_IBL                   = PSO_FLAG_BIT(29),
-        PSO_FLAG_USE_LIGHTS                = PSO_FLAG_BIT(30),
-        PSO_FLAG_USE_TEXTURE_ATLAS         = PSO_FLAG_BIT(31),
-        PSO_FLAG_ENABLE_TEXCOORD_TRANSFORM = PSO_FLAG_BIT(32),
-        PSO_FLAG_CONVERT_OUTPUT_TO_SRGB    = PSO_FLAG_BIT(33),
-        PSO_FLAG_ENABLE_CUSTOM_DATA_OUTPUT = PSO_FLAG_BIT(34),
-        PSO_FLAG_ENABLE_TONE_MAPPING       = PSO_FLAG_BIT(35),
-        PSO_FLAG_UNSHADED                  = PSO_FLAG_BIT(36),
-        PSO_FLAG_COMPUTE_MOTION_VECTORS    = PSO_FLAG_BIT(37),
-        PSO_FLAG_ENABLE_SHADOWS                = PSO_FLAG_BIT(38),
-        PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE = PSO_FLAG_BIT(39),
+        PSO_FLAG_ALL_CLEAR_COAT =
+            PSO_FLAG_ENABLE_CLEAR_COAT |
+            PSO_FLAG_USE_CLEAR_COAT_MAP |
+            PSO_FLAG_USE_CLEAR_COAT_ROUGHNESS_MAP |
+            PSO_FLAG_USE_CLEAR_COAT_NORMAL_MAP,
+
+        PSO_FLAG_ALL_SHEEN =
+            PSO_FLAG_ENABLE_SHEEN |
+            PSO_FLAG_USE_SHEEN_COLOR_MAP |
+            PSO_FLAG_USE_SHEEN_ROUGHNESS_MAP,
+
+        PSO_FLAG_ALL_ANISOTROPY =
+            PSO_FLAG_ENABLE_ANISOTROPY |
+            PSO_FLAG_USE_ANISOTROPY_MAP,
+
+        PSO_FLAG_ALL_IRIDESCENCE =
+            PSO_FLAG_ENABLE_IRIDESCENCE |
+            PSO_FLAG_USE_IRIDESCENCE_MAP |
+            PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP,
+
+        PSO_FLAG_ALL_TRANSMISSION =
+            PSO_FLAG_ENABLE_TRANSMISSION |
+            PSO_FLAG_USE_TRANSMISSION_MAP,
+
+        PSO_FLAG_ALL_VOLUME =
+            PSO_FLAG_ENABLE_VOLUME |
+            PSO_FLAG_USE_THICKNESS_MAP,
+
+        PSO_FLAG_ALL_SPECULAR =
+            PSO_FLAG_ENABLE_SPECULAR |
+            PSO_FLAG_USE_SPECULAR_MAP |
+            PSO_FLAG_USE_SPECULAR_COLOR_MAP,
+
+        PSO_FLAG_USE_IBL                       = PSO_FLAG_BIT(32),
+        PSO_FLAG_USE_LIGHTS                    = PSO_FLAG_BIT(33),
+        PSO_FLAG_USE_TEXTURE_ATLAS             = PSO_FLAG_BIT(34),
+        PSO_FLAG_ENABLE_TEXCOORD_TRANSFORM     = PSO_FLAG_BIT(35),
+        PSO_FLAG_CONVERT_OUTPUT_TO_SRGB        = PSO_FLAG_BIT(36),
+        PSO_FLAG_ENABLE_CUSTOM_DATA_OUTPUT     = PSO_FLAG_BIT(37),
+        PSO_FLAG_ENABLE_TONE_MAPPING           = PSO_FLAG_BIT(38),
+        PSO_FLAG_UNSHADED                      = PSO_FLAG_BIT(39),
+        PSO_FLAG_COMPUTE_MOTION_VECTORS        = PSO_FLAG_BIT(40),
+        PSO_FLAG_ENABLE_SHADOWS                = PSO_FLAG_BIT(41),
+        PSO_FLAG_USE_MORPH_TARGETS             = PSO_FLAG_BIT(42),
+        PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE = PSO_FLAG_BIT(43),
 
         PSO_FLAG_LAST = PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE,
 
@@ -580,6 +740,10 @@ public:
         PSO_FLAG_ALL_USER_DEFINED = ~(PSO_FLAG_FIRST_USER_DEFINED - 1ull)
     };
 
+    /// Returns the PSO flags permitted by the renderer settings.
+    /// User-defined flags are always preserved.
+    static PSO_FLAGS GetEnabledPSOFlags(const CreateInfo& Settings);
+
     static std::string GetPSOFlagsString(PSO_FLAGS Flags);
     static const char* GetAlphaModeString(ALPHA_MODE AlphaMode);
     static const char* GetRenderPassTypeString(RenderPassType Type);
@@ -589,49 +753,76 @@ public:
     public:
         constexpr PSOKey() noexcept {};
 
-        PSOKey(RenderPassType       _Type,
-               PSO_FLAGS            _Flags,
-               ALPHA_MODE           _AlphaMode,
-               CULL_MODE            _CullMode,
-               DebugViewType        _DebugView        = DebugViewType::None,
-               LoadingAnimationMode _LoadingAnimation = LoadingAnimationMode::None,
-               Uint64               _UserValue        = 0) noexcept;
+        PSOKey(RenderPassType                         _Type,
+               PSO_FLAGS                              _Flags,
+               ALPHA_MODE                             _AlphaMode,
+               CULL_MODE                              _CullMode,
+               DebugViewType                          _DebugView               = DebugViewType::None,
+               LoadingAnimationMode                   _LoadingAnimation        = LoadingAnimationMode::None,
+               Uint64                                 _UserValue               = 0,
+               const StaticShaderTextureIdsArrayType* _pStaticShaderTextureIds = nullptr) noexcept;
 
-        PSOKey(RenderPassType       _Type,
-               PSO_FLAGS            _Flags,
-               CULL_MODE            _CullMode,
-               DebugViewType        _DebugView        = DebugViewType::None,
-               LoadingAnimationMode _LoadingAnimation = LoadingAnimationMode::None,
-               Uint64               _UserValue        = 0) noexcept :
-            PSOKey{_Type, _Flags, ALPHA_MODE_OPAQUE, _CullMode, _DebugView, _LoadingAnimation, _UserValue}
+        PSOKey(RenderPassType                         _Type,
+               PSO_FLAGS                              _Flags,
+               CULL_MODE                              _CullMode,
+               DebugViewType                          _DebugView               = DebugViewType::None,
+               LoadingAnimationMode                   _LoadingAnimation        = LoadingAnimationMode::None,
+               Uint64                                 _UserValue               = 0,
+               const StaticShaderTextureIdsArrayType* _pStaticShaderTextureIds = nullptr) noexcept :
+            PSOKey{
+                _Type,
+                _Flags,
+                ALPHA_MODE_OPAQUE,
+                _CullMode,
+                _DebugView,
+                _LoadingAnimation,
+                _UserValue,
+                _pStaticShaderTextureIds,
+            }
         {}
 
         PSOKey(PSO_FLAGS     _Flags,
                ALPHA_MODE    _AlphaMode,
                CULL_MODE     _CullMode,
                const PSOKey& Other) noexcept :
-            PSOKey{Other.GetType(), _Flags, _AlphaMode, _CullMode, Other.GetDebugView(), Other.GetLoadingAnimation(), Other.GetUserValue()}
+            PSOKey{
+                Other.GetType(),
+                _Flags,
+                _AlphaMode,
+                _CullMode,
+                Other.GetDebugView(),
+                Other.GetLoadingAnimation(),
+                Other.GetUserValue(),
+                Other.GetStaticShaderTextureIds(),
+            }
         {}
 
         PSOKey(PSO_FLAGS     _Flags,
                const PSOKey& Other) noexcept :
-            PSOKey{_Flags, Other.GetAlphaMode(), Other.GetCullMode(), Other}
+            PSOKey{
+                _Flags,
+                Other.GetAlphaMode(),
+                Other.GetCullMode(),
+                Other,
+            }
         {}
 
-        constexpr bool operator==(const PSOKey& rhs) const noexcept
+        bool operator==(const PSOKey& rhs) const noexcept
         {
             // clang-format off
-            return Hash             == rhs.Hash      &&
-                   Type             == rhs.Type      &&
-                   Flags            == rhs.Flags     &&
-                   CullMode         == rhs.CullMode  &&
-                   AlphaMode        == rhs.AlphaMode &&
-                   DebugView        == rhs.DebugView &&
-                   LoadingAnimation == rhs.LoadingAnimation &&
-                   UserValue        == rhs.UserValue;
+            return Hash                      == rhs.Hash      &&
+                   Type                      == rhs.Type      &&
+                   Flags                     == rhs.Flags     &&
+                   CullMode                  == rhs.CullMode  &&
+                   AlphaMode                 == rhs.AlphaMode &&
+                   DebugView                 == rhs.DebugView &&
+                   LoadingAnimation          == rhs.LoadingAnimation &&
+                   UserValue                 == rhs.UserValue &&
+                   HasStaticShaderTextureIds == rhs.HasStaticShaderTextureIds &&
+                   (!HasStaticShaderTextureIds || StaticShaderTextureIds == rhs.StaticShaderTextureIds);
             // clang-format on
         }
-        constexpr bool operator!=(const PSOKey& rhs) const noexcept
+        bool operator!=(const PSOKey& rhs) const noexcept
         {
             return !(*this == rhs);
         }
@@ -652,15 +843,22 @@ public:
         constexpr LoadingAnimationMode GetLoadingAnimation() const noexcept { return LoadingAnimation; }
         constexpr Uint64               GetUserValue() const noexcept { return UserValue; }
 
+        constexpr const StaticShaderTextureIdsArrayType* GetStaticShaderTextureIds() const noexcept
+        {
+            return HasStaticShaderTextureIds ? &StaticShaderTextureIds : nullptr;
+        }
+
     private:
-        RenderPassType       Type             = RenderPassType::Main;
-        PSO_FLAGS            Flags            = PSO_FLAG_NONE;
-        ALPHA_MODE           AlphaMode        = ALPHA_MODE_OPAQUE;
-        CULL_MODE            CullMode         = CULL_MODE_BACK;
-        DebugViewType        DebugView        = DebugViewType::None;
-        LoadingAnimationMode LoadingAnimation = LoadingAnimationMode::None;
-        Uint64               UserValue        = 0;
-        size_t               Hash             = 0;
+        PSO_FLAGS                       Flags                     = PSO_FLAG_NONE;
+        RenderPassType                  Type                      = RenderPassType::Main;
+        ALPHA_MODE                      AlphaMode                 = ALPHA_MODE_OPAQUE;
+        CULL_MODE                       CullMode                  = CULL_MODE_BACK;
+        DebugViewType                   DebugView                 = DebugViewType::None;
+        LoadingAnimationMode            LoadingAnimation          = LoadingAnimationMode::None;
+        bool                            HasStaticShaderTextureIds = false;
+        StaticShaderTextureIdsArrayType StaticShaderTextureIds{};
+        Uint64                          UserValue = 0;
+        size_t                          Hash      = 0;
     };
 
     using PsoHashMapType = std::unordered_map<PSOKey, RefCntAutoPtr<IPipelineState>, PSOKey::Hasher>;
@@ -725,15 +923,48 @@ public:
 
     PsoCacheAccessor GetPsoCacheAccessor(const GraphicsPipelineDesc& GraphicsDesc);
 
-    void InitCommonSRBVars(IShaderResourceBinding* pSRB,
-                           IBuffer*                pFrameAttribs,
-                           bool                    BindPrimitiveAttribsBuffer = true,
-                           bool                    BindMaterialAttribsBuffer  = true,
-                           ITextureView*           pShadowMap                 = nullptr) const;
+    struct InitCommonSRBVarsAttribs
+    {
+        /// Optional frame attributes buffer.
+        IBuffer* pFrameAttribs = nullptr;
+
+        /// Optional joints buffer. When null, the renderer-owned buffer is used.
+        IBuffer* pJointsBuffer = nullptr;
+
+        /// Optional structured Float32 buffer containing morph target deltas.
+        /// When null, the renderer-owned buffer is used. A buffer containing
+        /// the referenced data must be provided when PSO_FLAG_USE_MORPH_TARGETS
+        /// is enabled.
+        IBuffer* pMorphTargetDeltas = nullptr;
+
+        /// Optional shadow map view.
+        ITextureView* pShadowMap = nullptr;
+
+        /// Whether to bind the renderer-owned primitive attributes buffer.
+        bool BindPrimitiveAttribsBuffer = true;
+
+        /// Whether to bind the renderer-owned material attributes buffer.
+        bool BindMaterialAttribsBuffer = true;
+    };
+    void InitCommonSRBVars(IShaderResourceBinding*         pSRB,
+                           const InitCommonSRBVarsAttribs& Attribs) const;
 
     void SetMaterialTexture(IShaderResourceBinding* pSRB, ITextureView* pTexSRV, TEXTURE_ATTRIB_ID TextureId) const;
 
     void SetTransmissionSceneColor(IShaderResourceBinding* pSRB, ITextureView* pSceneColorSRV) const;
+
+    /// Binds a range of the material texture array.
+    bool SetMaterialTextures(IShaderResourceBinding* pSRB,
+                             ITextureView* const*    ppTextureSRVs,
+                             Uint32                  FirstTexture,
+                             Uint32                  TextureCount) const;
+
+    /// Binds IBL cubemaps. If pPrefilteredSheenEnvMapSRV is null, the
+    /// GGX-prefiltered environment map is used as an approximate sheen fallback.
+    void SetIBLResourceViews(IShaderResourceBinding* pSRB,
+                             ITextureView*           pIrradianceCubeSRV,
+                             ITextureView*           pPrefilteredEnvMapSRV,
+                             ITextureView*           pPrefilteredSheenEnvMapSRV = nullptr) const;
 
     void SetOITResources(IShaderResourceBinding* pSRB, const OITResources& OITResources) const;
 
@@ -741,7 +972,10 @@ public:
     ///
     /// \remarks    The function initializes the following parameters:
     ///             - PrefilteredCubeLastMip
-    void SetInternalShaderParameters(HLSL::PBRRendererShaderParameters& Renderer);
+    ///             - EnvironmentRotation
+    void SetInternalShaderParameters(HLSL::PBRRendererShaderParameters& Renderer,
+                                     ITextureView*                      pPrefilteredEnvMapSRV,
+                                     float                              EnvironmentYaw = 0.f) const;
 
     /// Returns the PBR primitive attributes shader data size for the given PSO flags.
     Uint32 GetPBRPrimitiveAttribsSize(PSO_FLAGS Flags, Uint32 CustomDataSize = sizeof(float4)) const;
@@ -759,6 +993,10 @@ public:
 
     inline static constexpr PSO_FLAGS GetTextureAttribPSOFlag(TEXTURE_ATTRIB_ID AttribId);
 
+    /// Returns true if the texture attribute represents color data that must
+    /// be sampled through an sRGB texture view.
+    inline static constexpr bool IsSRGBTextureAttribute(TEXTURE_ATTRIB_ID AttribId);
+
     /// Processes enabled texture attributes with the given handler.
     template <typename HandlerType>
     inline static void ProcessTexturAttribs(PSO_FLAGS PSOFlags, HandlerType&& Handler);
@@ -775,10 +1013,11 @@ public:
     static void* WriteSkinningData(void* pDst, const WriteSkinningDataAttribs& Attribs, bool PackMatrixRowMajor, Uint32 MaxJointCount);
     void*        WriteSkinningData(void* pDst, const WriteSkinningDataAttribs& Attribs);
 
-    static Uint32 GetJointsDataSize(Uint32 MaxJointCount, bool UsePrevFrameTransforms);
-    Uint32        GetJointsDataSize(Uint32 JointCount, PSO_FLAGS PSOFlags) const;
-    Uint32        GetJointsBufferSize() const;
-    const char*   GetJointTransformsVarName() const;
+    static Uint32      GetJointsDataSize(Uint32 MaxJointCount, bool UsePrevFrameTransforms);
+    Uint32             GetJointsDataSize(Uint32 JointCount, PSO_FLAGS PSOFlags) const;
+    Uint32             GetJointsBufferSize() const;
+    const char*        GetJointTransformsVarName() const;
+    static const char* GetMorphTargetDeltasVarName();
 
     /// Packs normal into a single 32-bit uint.
     ///
@@ -830,8 +1069,18 @@ protected:
     virtual void CreateCustomSignature(PipelineResourceSignatureDescX&& SignatureDesc);
 
 private:
+    enum class BRDFType : Uint8
+    {
+        GGX,
+        Sheen
+    };
+
     void PrecomputeBRDF(IDeviceContext* pCtx,
-                        Uint32          NumBRDFSamples = 512);
+                        Uint32          NumBRDFSamples,
+                        BRDFType        Type);
+
+    /// Generate the environment-independent sampling distribution for sheen IBL during construction.
+    void PrecomputeSheenSampling(IDeviceContext* pCtx);
 
     void CreatePSO(PsoHashMapType&             PsoHashMap,
                    const GraphicsPipelineDesc& GraphicsDesc,
@@ -853,12 +1102,14 @@ protected:
         enum PSO_TYPE : Uint8
         {
             PSO_TYPE_IRRADIANCE_CUBE = 0,
-            PSO_TYPE_PREFILTERED_ENV_MAP,
+            PSO_TYPE_PREFILTERED_GGX_ENV_MAP,
+            PSO_TYPE_PREFILTERED_CHARLIE_ENV_MAP,
         };
         enum ENV_MAP_TYPE : Uint8
         {
             ENV_MAP_TYPE_CUBE = 0,
             ENV_MAP_TYPE_SPHERE,
+            ENV_MAP_TYPE_SPHERE_ARRAY,
             ENV_MAP_TYPE_NUM_TYPES
         };
 
@@ -915,27 +1166,22 @@ protected:
 
     static constexpr Uint32     BRDF_LUT_Dim = 512;
     RefCntAutoPtr<ITextureView> m_pPreintegratedGGX_SRV;
-    RefCntAutoPtr<ITextureView> m_pPreintegratedCharlie_SRV;
-    RefCntAutoPtr<ITextureView> m_pSheenAlbedoScaling_LUT_SRV;
+    RefCntAutoPtr<ITextureView> m_pPreintegratedSheen_SRV;
+
+    /// Inverse CDF of the view-averaged Charlie kernel; used only for prefiltering.
+    RefCntAutoPtr<ITextureView> m_pSheenSampling_SRV;
 
     RefCntAutoPtr<ITextureView> m_pWhiteTexSRV;
     RefCntAutoPtr<ITextureView> m_pBlackTexSRV;
     RefCntAutoPtr<ITextureView> m_pDefaultNormalMapSRV;
     RefCntAutoPtr<ITextureView> m_pDefaultPhysDescSRV;
 
-    static constexpr TEXTURE_FORMAT PrefilteredEnvMapFmt = TEX_FORMAT_RGBA16_FLOAT;
-    static constexpr TEXTURE_FORMAT IrradianceCubeFmt    = TEX_FORMAT_RGBA16_FLOAT;
-    static constexpr Uint32         IrradianceCubeDim    = 64;
-    static constexpr Uint32         PrefilteredEnvMapDim = 256;
-
-    RefCntAutoPtr<ITextureView> m_pIrradianceCubeSRV;
-    RefCntAutoPtr<ITextureView> m_pPrefilteredEnvMapSRV;
-
     IBL_PipelineStateObjectCache m_IBL_PSOCache;
 
     RefCntAutoPtr<IBuffer> m_PBRPrimitiveAttribsCB;
     RefCntAutoPtr<IBuffer> m_PBRMaterialAttribsCB;
     RefCntAutoPtr<IBuffer> m_JointsBuffer;
+    RefCntAutoPtr<IBuffer> m_MorphTargetBuffer;
 
     std::unordered_set<std::string> m_GeneratedIncludes;
 
@@ -978,10 +1224,21 @@ inline constexpr PBR_Renderer::PSO_FLAGS PBR_Renderer::GetTextureAttribPSOFlag(P
     static_assert(PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP == 1u << TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS, "PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP must be 1 << TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS");
     static_assert(PSO_FLAG_USE_TRANSMISSION_MAP          == 1u << TEXTURE_ATTRIB_ID_TRANSMISSION,          "PSO_FLAG_USE_TRANSMISSION_MAP must be 1 << TEXTURE_ATTRIB_ID_TRANSMISSION");
     static_assert(PSO_FLAG_USE_THICKNESS_MAP             == 1u << TEXTURE_ATTRIB_ID_THICKNESS,             "PSO_FLAG_USE_THICKNESS_MAP must be 1 << TEXTURE_ATTRIB_ID_THICKNESS");
+    static_assert(PSO_FLAG_USE_SPECULAR_MAP              == 1u << TEXTURE_ATTRIB_ID_SPECULAR,              "PSO_FLAG_USE_SPECULAR_MAP must be 1 << TEXTURE_ATTRIB_ID_SPECULAR");
+    static_assert(PSO_FLAG_USE_SPECULAR_COLOR_MAP        == 1u << TEXTURE_ATTRIB_ID_SPECULAR_COLOR,        "PSO_FLAG_USE_SPECULAR_COLOR_MAP must be 1 << TEXTURE_ATTRIB_ID_SPECULAR_COLOR");
     // clang-format on
-    static_assert(PBR_Renderer::PSO_FLAG_LAST_TEXTURE == 1u << 16u, "Did you add new texture flag? You may need to handle it here.");
+    static_assert(PBR_Renderer::PSO_FLAG_LAST_TEXTURE == 1u << 18u, "Did you add new texture flag? You may need to handle it here.");
 
     return static_cast<PBR_Renderer::PSO_FLAGS>(Uint64{1} << AttribId);
+}
+
+inline constexpr bool PBR_Renderer::IsSRGBTextureAttribute(PBR_Renderer::TEXTURE_ATTRIB_ID AttribId)
+{
+    static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 19, "Did you add a new texture attribute? It may need to be handled here.");
+    return (AttribId == PBR_Renderer::TEXTURE_ATTRIB_ID_BASE_COLOR ||
+            AttribId == PBR_Renderer::TEXTURE_ATTRIB_ID_EMISSIVE ||
+            AttribId == PBR_Renderer::TEXTURE_ATTRIB_ID_SHEEN_COLOR ||
+            AttribId == PBR_Renderer::TEXTURE_ATTRIB_ID_SPECULAR_COLOR);
 }
 
 template <typename HandlerType>

@@ -34,6 +34,10 @@
 #include "GraphicsUtilities.h"
 #include "ShaderSourceFactoryUtils.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
+
 namespace Diligent
 {
 
@@ -48,12 +52,22 @@ struct EnvMapRenderer::EnvMapShaderAttribs
 {
     HLSL::ToneMappingAttribs ToneMapping;
 
-    float AverageLogLum = 0.3f;
-    float MipLevel      = 0.f;
-    float Alpha         = 0.f;
-    float Padding       = 0.f;
+    float AverageLogLum  = 0.3f;
+    float MipLevel       = 0.f;
+    float Alpha          = 0.f;
+    float SphereMapWidth = 1.f;
 
     float4 Scale{1, 1, 1, 1};
+
+    float4 SphereMapUVScaleBias{1, 1, 0, 0};
+
+    float SphereMapSlice           = 0.f;
+    Int32 SphereMapRow0IsNegativeY = 0;
+    float SphereMapHeight          = 1.f;
+    float EnvMapMipCount           = 1.f;
+
+    float2 EnvironmentRotation{1.f, 0.f};
+    float2 Padding{};
 };
 
 EnvMapRenderer::EnvMapRenderer(const CreateInfo& CI) :
@@ -124,6 +138,7 @@ IPipelineState* EnvMapRenderer::GetPSO(const PSOKey& Key)
         .Add("COMPUTE_MOTION_VECTORS", (Key.Flags & OPTION_FLAG_COMPUTE_MOTION_VECTORS) != 0)
         .Add("ENV_MAP_TYPE_CUBE", static_cast<int>(PSOKey::ENV_MAP_TYPE_CUBE))
         .Add("ENV_MAP_TYPE_SPHERE", static_cast<int>(PSOKey::ENV_MAP_TYPE_SPHERE))
+        .Add("ENV_MAP_TYPE_SPHERE_ARRAY", static_cast<int>(PSOKey::ENV_MAP_TYPE_SPHERE_ARRAY))
         .Add("ENV_MAP_TYPE", static_cast<int>(Key.EnvMapType));
     ShaderCI.Macros = Macros;
 
@@ -156,11 +171,15 @@ IPipelineState* EnvMapRenderer::GetPSO(const PSOKey& Key)
         }
     }
 
+    SamplerDesc EnvMapSampler = Sam_LinearClamp;
+    if (Key.EnvMapType == PSOKey::ENV_MAP_TYPE_SPHERE)
+        EnvMapSampler.AddressU = TEXTURE_ADDRESS_WRAP;
+
     PipelineResourceLayoutDescX ResourceLauout;
     ResourceLauout
         .SetDefaultVariableMergeStages(SHADER_TYPE_VS_PS)
         .AddVariable(SHADER_TYPE_PIXEL, "EnvMap", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC)
-        .AddImmutableSampler(SHADER_TYPE_PIXEL, "EnvMap", Sam_LinearClamp);
+        .AddImmutableSampler(SHADER_TYPE_PIXEL, "EnvMap", EnvMapSampler);
 
     GraphicsPipelineStateCreateInfoX PsoCI{"Environment Map PSO"};
     PsoCI
@@ -190,15 +209,34 @@ IPipelineState* EnvMapRenderer::GetPSO(const PSOKey& Key)
     PSO->GetStaticVariableByName(SHADER_TYPE_PIXEL, "cbCameraAttribs")->Set(m_pCameraAttribsCB);
     PSO->GetStaticVariableByName(SHADER_TYPE_PIXEL, "cbEnvMapRenderAttribs")->Set(m_RenderAttribsCB);
 
-    if (!m_SRB)
+    auto InsertResult = m_PSOs.emplace(Key, std::move(PSO));
+    return InsertResult.first->second;
+}
+
+EnvMapRenderer::SRBData* EnvMapRenderer::GetSRBData(PSOKey::ENV_MAP_TYPE EnvMapType, IPipelineState* pPSO)
+{
+    VERIFY_EXPR(EnvMapType < PSOKey::ENV_MAP_TYPE_COUNT && pPSO != nullptr);
+
+    SRBData& Data = m_SRBData[static_cast<size_t>(EnvMapType)];
+    if (Data.pSRB != nullptr)
+        return &Data;
+
+    pPSO->CreateShaderResourceBinding(&Data.pSRB, true);
+    if (Data.pSRB == nullptr)
     {
-        PSO->CreateShaderResourceBinding(&m_SRB, true);
-        m_pEnvMapVar = m_SRB->GetVariableByName(SHADER_TYPE_PIXEL, "EnvMap");
-        VERIFY_EXPR(m_pEnvMapVar != nullptr);
+        UNEXPECTED("Failed to create environment map SRB");
+        return nullptr;
     }
 
-    m_PSOs.emplace(Key, PSO);
-    return PSO;
+    Data.pEnvMapVar = Data.pSRB->GetVariableByName(SHADER_TYPE_PIXEL, "EnvMap");
+    if (Data.pEnvMapVar == nullptr)
+    {
+        UNEXPECTED("Failed to get environment map shader resource variable");
+        Data.pSRB.Release();
+        return nullptr;
+    }
+
+    return &Data;
 }
 
 void EnvMapRenderer::Prepare(IDeviceContext*                 pContext,
@@ -211,32 +249,77 @@ void EnvMapRenderer::Prepare(IDeviceContext*                 pContext,
         return;
     }
 
-    const PSOKey::ENV_MAP_TYPE EnvMapType = Attribs.pEnvMap->GetTexture()->GetDesc().IsCube() ?
-        PSOKey::ENV_MAP_TYPE_CUBE :
-        PSOKey::ENV_MAP_TYPE_SPHERE;
+    PSOKey::ENV_MAP_TYPE EnvMapType = PSOKey::ENV_MAP_TYPE_COUNT;
+    switch (Attribs.pEnvMap->GetDesc().TextureDim)
+    {
+        case RESOURCE_DIM_TEX_CUBE:
+            EnvMapType = PSOKey::ENV_MAP_TYPE_CUBE;
+            break;
+
+        case RESOURCE_DIM_TEX_2D:
+            EnvMapType = PSOKey::ENV_MAP_TYPE_SPHERE;
+            break;
+
+        case RESOURCE_DIM_TEX_2D_ARRAY:
+            EnvMapType = PSOKey::ENV_MAP_TYPE_SPHERE_ARRAY;
+            break;
+
+        default:
+            UNEXPECTED("Environment map SRV must be a cube, 2D, or 2D array texture view");
+            return;
+    }
 
     m_pCurrentPSO = GetPSO({ToneMapping.iToneMappingMode, Attribs.Options, EnvMapType});
     if (m_pCurrentPSO == nullptr)
     {
-        UNEXPECTED("Failed to get PSO");
+        UNEXPECTED("Failed to get environment map PSO");
         return;
     }
 
-    m_pEnvMapVar->Set(Attribs.pEnvMap);
+    m_pCurrentSRBData = GetSRBData(EnvMapType, m_pCurrentPSO);
+    if (m_pCurrentSRBData == nullptr)
+    {
+        UNEXPECTED("Failed to get environment map SRB");
+        m_pCurrentPSO = nullptr;
+        return;
+    }
+
+    m_pCurrentSRBData->pEnvMapVar->Set(Attribs.pEnvMap);
+
+    const TextureDesc& EnvMapDesc      = Attribs.pEnvMap->GetTexture()->GetDesc();
+    const float        MipCount        = static_cast<float>(std::max(EnvMapDesc.MipLevels, 1u));
+    const float        MipLevel        = std::max(0.f, std::min(Attribs.MipLevel, MipCount - 1.f));
+    const float        SphereMapWidth  = std::max(std::floor(static_cast<float>(EnvMapDesc.Width) * Attribs.SphereMapUVScaleBias.x + 0.5f), 1.f);
+    const float        SphereMapHeight = std::max(std::floor(static_cast<float>(EnvMapDesc.Height) * Attribs.SphereMapUVScaleBias.y + 0.5f), 1.f);
+    const float2       EnvironmentRotation{std::cos(Attribs.Yaw), std::sin(Attribs.Yaw)};
 
     if (m_ShaderAttribs)
     {
         if (std::memcmp(&m_ShaderAttribs->ToneMapping, &ToneMapping, sizeof(ToneMapping)) != 0 ||
             m_ShaderAttribs->AverageLogLum != Attribs.AverageLogLum ||
-            m_ShaderAttribs->MipLevel != Attribs.MipLevel ||
+            m_ShaderAttribs->MipLevel != MipLevel ||
             m_ShaderAttribs->Alpha != Attribs.Alpha ||
-            m_ShaderAttribs->Scale != float4{Attribs.Scale, 1})
+            m_ShaderAttribs->Scale != float4{Attribs.Scale, 1} ||
+            m_ShaderAttribs->SphereMapUVScaleBias != Attribs.SphereMapUVScaleBias ||
+            m_ShaderAttribs->SphereMapSlice != Attribs.SphereMapSlice ||
+            m_ShaderAttribs->SphereMapRow0IsNegativeY != static_cast<Int32>(Attribs.SphereMapRow0IsNegativeY) ||
+            m_ShaderAttribs->SphereMapWidth != SphereMapWidth ||
+            m_ShaderAttribs->SphereMapHeight != SphereMapHeight ||
+            m_ShaderAttribs->EnvMapMipCount != MipCount ||
+            m_ShaderAttribs->EnvironmentRotation != EnvironmentRotation)
         {
-            m_ShaderAttribs->ToneMapping   = ToneMapping;
-            m_ShaderAttribs->AverageLogLum = Attribs.AverageLogLum;
-            m_ShaderAttribs->MipLevel      = Attribs.MipLevel;
-            m_ShaderAttribs->Alpha         = Attribs.Alpha;
-            m_ShaderAttribs->Scale         = float4{Attribs.Scale, 1};
+            m_ShaderAttribs->ToneMapping              = ToneMapping;
+            m_ShaderAttribs->AverageLogLum            = Attribs.AverageLogLum;
+            m_ShaderAttribs->MipLevel                 = MipLevel;
+            m_ShaderAttribs->Alpha                    = Attribs.Alpha;
+            m_ShaderAttribs->Scale                    = float4{Attribs.Scale, 1};
+            m_ShaderAttribs->SphereMapUVScaleBias     = Attribs.SphereMapUVScaleBias;
+            m_ShaderAttribs->SphereMapSlice           = Attribs.SphereMapSlice;
+            m_ShaderAttribs->SphereMapRow0IsNegativeY = static_cast<Int32>(Attribs.SphereMapRow0IsNegativeY);
+            m_ShaderAttribs->SphereMapWidth           = SphereMapWidth;
+            m_ShaderAttribs->SphereMapHeight          = SphereMapHeight;
+            m_ShaderAttribs->EnvMapMipCount           = MipCount;
+            m_ShaderAttribs->EnvironmentRotation      = EnvironmentRotation;
 
             pContext->UpdateBuffer(m_RenderAttribsCB, 0, sizeof(EnvMapShaderAttribs), m_ShaderAttribs.get(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
             StateTransitionDesc Barrier{m_RenderAttribsCB, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_CONSTANT_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE};
@@ -247,11 +330,18 @@ void EnvMapRenderer::Prepare(IDeviceContext*                 pContext,
     {
         if (MapHelper<EnvMapShaderAttribs> EnvMapAttribs{pContext, m_RenderAttribsCB, MAP_WRITE, MAP_FLAG_DISCARD})
         {
-            EnvMapAttribs->ToneMapping   = ToneMapping;
-            EnvMapAttribs->AverageLogLum = Attribs.AverageLogLum;
-            EnvMapAttribs->MipLevel      = Attribs.MipLevel;
-            EnvMapAttribs->Alpha         = Attribs.Alpha;
-            EnvMapAttribs->Scale         = float4{Attribs.Scale, 1};
+            EnvMapAttribs->ToneMapping              = ToneMapping;
+            EnvMapAttribs->AverageLogLum            = Attribs.AverageLogLum;
+            EnvMapAttribs->MipLevel                 = MipLevel;
+            EnvMapAttribs->Alpha                    = Attribs.Alpha;
+            EnvMapAttribs->Scale                    = float4{Attribs.Scale, 1};
+            EnvMapAttribs->SphereMapUVScaleBias     = Attribs.SphereMapUVScaleBias;
+            EnvMapAttribs->SphereMapSlice           = Attribs.SphereMapSlice;
+            EnvMapAttribs->SphereMapRow0IsNegativeY = static_cast<Int32>(Attribs.SphereMapRow0IsNegativeY);
+            EnvMapAttribs->SphereMapWidth           = SphereMapWidth;
+            EnvMapAttribs->SphereMapHeight          = SphereMapHeight;
+            EnvMapAttribs->EnvMapMipCount           = MipCount;
+            EnvMapAttribs->EnvironmentRotation      = EnvironmentRotation;
         }
     }
 }
@@ -264,14 +354,14 @@ void EnvMapRenderer::Render(IDeviceContext* pContext)
         return;
     }
 
-    if (m_pCurrentPSO == nullptr)
+    if (m_pCurrentPSO == nullptr || m_pCurrentSRBData == nullptr)
     {
-        UNEXPECTED("Current PSO is null. Did you forget to call Prepare()?");
+        UNEXPECTED("Current environment map PSO or SRB is null. Did you forget to call Prepare()?");
         return;
     }
 
     pContext->SetPipelineState(m_pCurrentPSO);
-    pContext->CommitShaderResources(m_SRB, RESOURCE_STATE_TRANSITION_MODE_VERIFY);
+    pContext->CommitShaderResources(m_pCurrentSRBData->pSRB, RESOURCE_STATE_TRANSITION_MODE_VERIFY);
     DrawAttribs drawAttribs{3, DRAW_FLAG_VERIFY_ALL};
     pContext->Draw(drawAttribs);
 }

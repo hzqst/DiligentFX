@@ -1,6 +1,7 @@
 #include "BasicStructures.fxh"
 #include "ToneMapping.fxh"
 #include "ShaderUtilities.fxh"
+#include "SphereMapSampling.fxh"
 
 cbuffer cbCameraAttribs
 {
@@ -15,24 +16,52 @@ cbuffer cbEnvMapRenderAttribs
     float g_AverageLogLum;
     float g_MipLevel;
     float g_Alpha;
-    float Unusued2;
+    float g_SphereMapWidth;
     
     float4 g_Scale;
+
+    float4 g_SphereMapUVScaleBias;
+
+    float g_SphereMapSlice;
+    int   g_SphereMapRow0IsNegativeY;
+    float g_SphereMapHeight;
+    float g_EnvMapMipCount;
+
+    float2 g_EnvironmentRotation;
+    float2 g_Padding;
 }
 
 #if ENV_MAP_TYPE == ENV_MAP_TYPE_CUBE
 TextureCube  EnvMap;
 #elif ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE
 Texture2D    EnvMap;
+#elif ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE_ARRAY
+Texture2DArray EnvMap;
 #endif
 SamplerState EnvMap_sampler;
 
+#if ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE_ARRAY
+float3 SampleSphereMapAtlas(float2 UV)
+{
+    return SampleSphereMapAtlas(EnvMap, EnvMap_sampler, UV, g_SphereMapSlice,
+                                g_SphereMapUVScaleBias, float2(g_SphereMapWidth, g_SphereMapHeight),
+                                g_MipLevel, g_EnvMapMipCount);
+}
+#endif
+
 float3 SampleEnvrionmentMap(float3 R, float g_MipLevel)
 {
+    R = RotateDirectionAroundY(R, g_EnvironmentRotation);
+
 #if ENV_MAP_TYPE == ENV_MAP_TYPE_CUBE
     return EnvMap.SampleLevel(EnvMap_sampler, R, g_MipLevel).rgb;
-#elif ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE
-    return EnvMap.SampleLevel(EnvMap_sampler, TransformDirectionToSphereMapUV(R), g_MipLevel).rgb;
+#elif ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE || ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE_ARRAY
+    float2 UV = TransformDirectionToSphereMapUV(R, g_SphereMapRow0IsNegativeY != 0);
+#    if ENV_MAP_TYPE == ENV_MAP_TYPE_SPHERE_ARRAY
+    return SampleSphereMapAtlas(UV);
+#    else
+    return EnvMap.SampleLevel(EnvMap_sampler, UV, g_MipLevel).rgb;
+#    endif
 #endif
 }
 

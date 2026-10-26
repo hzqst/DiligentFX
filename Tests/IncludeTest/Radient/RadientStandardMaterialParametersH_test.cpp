@@ -1,0 +1,56 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "Radient/interface/RadientStandardMaterialParameters.h"
+
+using namespace Diligent;
+
+static_assert(RadientStandardMaterialSchemaVersion > 0, "The standard material schema version must be positive");
+static_assert(RadientStandardMaterialBaseColorFactorName[0] == 'B', "Unexpected base-color factor parameter name");
+static_assert(RadientStandardMaterialBaseColorTextureName[0] == 'B', "Unexpected base-color texture parameter name");
+static_assert(RadientStandardMaterialBaseColorTextureParameterNames.Texture[0] == 'B', "Unexpected base-color texture descriptor");
+static_assert(RadientStandardMaterialThicknessTextureParameterNames.Texture[0] == 'T', "Unexpected thickness texture descriptor");
+
+void RadientStandardMaterialParameters_CPP_TestHelpers(
+    const IRadientMaterialDefinitionAsset* pDefinition,
+    IRadientMaterialWriter*                pWriter,
+    IRadientTextureAsset*                  pTexture)
+{
+    RadientStandardMaterialTextureParameters Parameters{pTexture};
+    Parameters.UVSelector = 1;
+    Parameters.UVScale    = {2.f, 2.f};
+    Parameters.UVRotation = 0.5f;
+    Parameters.UVBias     = {0.25f, 0.5f};
+    Parameters.WrapU      = RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE_CLAMP;
+    Parameters.WrapV      = RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE_WRAP;
+
+    const RADIENT_STATUS Status = SetStandardMaterialTextureParameters(
+        *pDefinition,
+        *pWriter,
+        RadientStandardMaterialBaseColorTextureParameterNames,
+        Parameters);
+    (void)Status;
+}

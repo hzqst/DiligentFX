@@ -85,7 +85,9 @@ struct PBRRendererCreateInfoWrapper
         CI.TextureAttribIndices[PBR_Renderer::TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS] = GLTF::DefaultIridescenceThicknessTextureAttribId;
         CI.TextureAttribIndices[PBR_Renderer::TEXTURE_ATTRIB_ID_TRANSMISSION]          = GLTF::DefaultTransmissionTextureAttribId;
         CI.TextureAttribIndices[PBR_Renderer::TEXTURE_ATTRIB_ID_THICKNESS]             = GLTF::DefaultThicknessTextureAttribId;
-        static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 17, "Please update the initializer list above");
+        CI.TextureAttribIndices[PBR_Renderer::TEXTURE_ATTRIB_ID_SPECULAR]              = GLTF::DefaultSpecularTextureAttribId;
+        CI.TextureAttribIndices[PBR_Renderer::TEXTURE_ATTRIB_ID_SPECULAR_COLOR]        = GLTF::DefaultSpecularColorTextureAttribId;
+        static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 19, "Please update the initializer list above");
 
         if (_CI.ShaderTexturesArrayMode == PBR_Renderer::SHADER_TEXTURE_ARRAY_MODE_DYNAMIC)
         {
@@ -141,11 +143,9 @@ static RefCntAutoPtr<ITextureView> GetPBRTextureSRV(ITexture*                   
 
     const TextureDesc& TexDesc = pTexture->GetDesc();
     TEXTURE_FORMAT     ViewFmt = TexDesc.Format;
-    static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 17, "Did you add a new texture attribute? It may need to be handled here.");
+    static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 19, "Did you add a new texture attribute? It may need to be handled here.");
     if ((ConversionMode == PBR_Renderer::CreateInfo::TEX_COLOR_CONVERSION_MODE_NONE) &&
-        (ID == PBR_Renderer::TEXTURE_ATTRIB_ID_BASE_COLOR ||
-         ID == PBR_Renderer::TEXTURE_ATTRIB_ID_EMISSIVE ||
-         ID == PBR_Renderer::TEXTURE_ATTRIB_ID_SHEEN_COLOR))
+        PBR_Renderer::IsSRGBTextureAttribute(ID))
     {
         const TextureFormatAttribs& FmtInfo = GetTextureFormatAttribs(ViewFmt);
         if (FmtInfo.ComponentType != COMPONENT_TYPE_UNORM_SRGB)
@@ -193,7 +193,7 @@ void GLTF_PBR_Renderer::InitMaterialSRB(GLTF::Model&            Model,
         return;
     }
 
-    InitCommonSRBVars(pMaterialSRB, pFrameAttribs);
+    InitCommonSRBVars(pMaterialSRB, InitCommonSRBVarsAttribs{pFrameAttribs});
 
     auto SetTexture = [&](TEXTURE_ATTRIB_ID ID, ITextureView* pDefaultTexSRV) //
     {
@@ -222,7 +222,10 @@ void GLTF_PBR_Renderer::InitMaterialSRB(GLTF::Model&            Model,
     };
 
     SetTexture(TEXTURE_ATTRIB_ID_BASE_COLOR, m_pWhiteTexSRV);
-    SetTexture(TEXTURE_ATTRIB_ID_PHYS_DESC, m_pDefaultPhysDescSRV);
+    SetTexture(TEXTURE_ATTRIB_ID_PHYS_DESC,
+               Material.Attribs.Workflow == GLTF::Material::PBR_WORKFLOW_SPEC_GLOSS ?
+                   m_pWhiteTexSRV :
+                   m_pDefaultPhysDescSRV);
     SetTexture(TEXTURE_ATTRIB_ID_NORMAL, m_pDefaultNormalMapSRV);
 
     if (m_Settings.EnableAO)
@@ -246,6 +249,12 @@ void GLTF_PBR_Renderer::InitMaterialSRB(GLTF::Model&            Model,
     {
         SetTexture(TEXTURE_ATTRIB_ID_SHEEN_COLOR, m_pWhiteTexSRV);
         SetTexture(TEXTURE_ATTRIB_ID_SHEEN_ROUGHNESS, m_pWhiteTexSRV);
+    }
+
+    if (m_Settings.EnableSpecular)
+    {
+        SetTexture(TEXTURE_ATTRIB_ID_SPECULAR, m_pWhiteTexSRV);
+        SetTexture(TEXTURE_ATTRIB_ID_SPECULAR_COLOR, m_pWhiteTexSRV);
     }
 
     if (m_Settings.EnableAnisotropy)
@@ -274,6 +283,9 @@ void GLTF_PBR_Renderer::CreateResourceCacheSRB(IRenderDevice*           pDevice,
                                                IDeviceContext*          pCtx,
                                                ResourceCacheUseInfo&    CacheUseInfo,
                                                IBuffer*                 pFrameAttribs,
+                                               ITextureView*            pIrradianceCubeSRV,
+                                               ITextureView*            pPrefilteredEnvMapSRV,
+                                               ITextureView*            pPrefilteredSheenEnvMapSRV,
                                                IShaderResourceBinding** ppCacheSRB)
 {
     DEV_CHECK_ERR(CacheUseInfo.pResourceMgr != nullptr, "Resource manager must not be null");
@@ -287,7 +299,8 @@ void GLTF_PBR_Renderer::CreateResourceCacheSRB(IRenderDevice*           pDevice,
         return;
     }
 
-    InitCommonSRBVars(pSRB, pFrameAttribs);
+    InitCommonSRBVars(pSRB, InitCommonSRBVarsAttribs{pFrameAttribs});
+    SetIBLResourceViews(pSRB, pIrradianceCubeSRV, pPrefilteredEnvMapSRV, pPrefilteredSheenEnvMapSRV);
 
     auto SetTexture = [&](TEXTURE_ATTRIB_ID ID) //
     {
@@ -328,6 +341,12 @@ void GLTF_PBR_Renderer::CreateResourceCacheSRB(IRenderDevice*           pDevice,
     {
         SetTexture(TEXTURE_ATTRIB_ID_SHEEN_COLOR);
         SetTexture(TEXTURE_ATTRIB_ID_SHEEN_ROUGHNESS);
+    }
+
+    if (m_Settings.EnableSpecular)
+    {
+        SetTexture(TEXTURE_ATTRIB_ID_SPECULAR);
+        SetTexture(TEXTURE_ATTRIB_ID_SPECULAR_COLOR);
     }
 
     if (m_Settings.EnableAnisotropy)
@@ -380,7 +399,10 @@ void GLTF_PBR_Renderer::Begin(IRenderDevice*         pDevice,
                               IDeviceContext*        pCtx,
                               ResourceCacheUseInfo&  CacheUseInfo,
                               ResourceCacheBindings& Bindings,
-                              IBuffer*               pFrameAttribs)
+                              IBuffer*               pFrameAttribs,
+                              ITextureView*          pIrradianceCubeSRV,
+                              ITextureView*          pPrefilteredEnvMapSRV,
+                              ITextureView*          pPrefilteredSheenEnvMapSRV)
 {
     VERIFY(CacheUseInfo.pResourceMgr != nullptr, "Resource manager must not be null.");
     VERIFY(CacheUseInfo.VtxLayoutKey != GLTF::ResourceManager::VertexLayoutKey{}, "Vertex layout key must not be null.");
@@ -391,7 +413,7 @@ void GLTF_PBR_Renderer::Begin(IRenderDevice*         pDevice,
     if (!Bindings.pSRB || Bindings.Version != TextureVersion)
     {
         Bindings.pSRB.Release();
-        CreateResourceCacheSRB(pDevice, pCtx, CacheUseInfo, pFrameAttribs, &Bindings.pSRB);
+        CreateResourceCacheSRB(pDevice, pCtx, CacheUseInfo, pFrameAttribs, pIrradianceCubeSRV, pPrefilteredEnvMapSRV, pPrefilteredSheenEnvMapSRV, &Bindings.pSRB);
         if (!Bindings.pSRB)
         {
             LOG_ERROR_MESSAGE("Failed to create an SRB for GLTF resource cache");
@@ -421,69 +443,30 @@ void GLTF_PBR_Renderer::Begin(IRenderDevice*         pDevice,
     pCtx->SetIndexBuffer(pIndexBuffer, 0, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 }
 
-GLTF_PBR_Renderer::PSO_FLAGS GLTF_PBR_Renderer::GetMaterialPSOFlags(const GLTF::Material& Mat) const
+GLTF_PBR_Renderer::PSO_FLAGS GLTF_PBR_Renderer::GetMaterialPSOFlags(const GLTF::Material& Material)
 {
-    // Color, normal and physical descriptor maps are always enabled
-    PSO_FLAGS PSOFlags =
-        PSO_FLAG_USE_COLOR_MAP |
-        PSO_FLAG_USE_NORMAL_MAP |
-        PSO_FLAG_USE_PHYS_DESC_MAP;
+    PSO_FLAGS PSOFlags = PSO_FLAG_DEFAULT_TEXTURES;
 
-    if (m_Settings.EnableAO)
-    {
-        PSOFlags |= PSO_FLAG_USE_AO_MAP;
-    }
+    if (Material.HasClearcoat)
+        PSOFlags |= PSO_FLAG_ALL_CLEAR_COAT;
 
-    if (m_Settings.EnableEmissive)
-    {
-        PSOFlags |= PSO_FLAG_USE_EMISSIVE_MAP;
-    }
+    if (Material.Sheen)
+        PSOFlags |= PSO_FLAG_ALL_SHEEN;
 
-    if (m_Settings.EnableClearCoat && Mat.HasClearcoat)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_CLEAR_COAT |
-            PSO_FLAG_USE_CLEAR_COAT_MAP |
-            PSO_FLAG_USE_CLEAR_COAT_ROUGHNESS_MAP |
-            PSO_FLAG_USE_CLEAR_COAT_NORMAL_MAP;
-    }
+    if (Material.Specular)
+        PSOFlags |= PSO_FLAG_ALL_SPECULAR;
 
-    if (m_Settings.EnableSheen && Mat.Sheen)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_SHEEN |
-            PSO_FLAG_USE_SHEEN_COLOR_MAP |
-            PSO_FLAG_USE_SHEEN_ROUGHNESS_MAP;
-    }
+    if (Material.Anisotropy)
+        PSOFlags |= PSO_FLAG_ALL_ANISOTROPY;
 
-    if (m_Settings.EnableAnisotropy && Mat.Anisotropy)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_ANISOTROPY |
-            PSO_FLAG_USE_ANISOTROPY_MAP;
-    }
+    if (Material.Iridescence)
+        PSOFlags |= PSO_FLAG_ALL_IRIDESCENCE;
 
-    if (m_Settings.EnableIridescence && Mat.Iridescence)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_IRIDESCENCE |
-            PSO_FLAG_USE_IRIDESCENCE_MAP |
-            PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP;
-    }
+    if (Material.Transmission)
+        PSOFlags |= PSO_FLAG_ALL_TRANSMISSION;
 
-    if (m_Settings.EnableTransmission && Mat.Transmission)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_TRANSMISSION |
-            PSO_FLAG_USE_TRANSMISSION_MAP;
-    }
-
-    if (m_Settings.EnableVolume && Mat.Volume)
-    {
-        PSOFlags |=
-            PSO_FLAG_ENABLE_VOLUME |
-            PSO_FLAG_USE_THICKNESS_MAP;
-    }
+    if (Material.Volume)
+        PSOFlags |= PSO_FLAG_ALL_VOLUME;
 
     return PSOFlags;
 }
@@ -588,8 +571,8 @@ void GLTF_PBR_Renderer::Render(IDeviceContext*              pCtx,
             if ((RenderParams.AlphaModes & (1u << AlphaMode)) == 0)
                 continue;
 
-            RENDER_LIST_ID RenderListId = RENDER_LIST_OPAQUE;
-            RenderInfo::SURFACE_FLAGS SurfaceFlag = RenderInfo::SURFACE_FLAG_OPAQUE;
+            RENDER_LIST_ID            RenderListId = RENDER_LIST_OPAQUE;
+            RenderInfo::SURFACE_FLAGS SurfaceFlag  = RenderInfo::SURFACE_FLAG_OPAQUE;
 
             const bool IsTransmissive = m_Settings.EnableTransmission &&
                 Material.Transmission != nullptr &&
@@ -652,15 +635,15 @@ void GLTF_PBR_Renderer::Render(IDeviceContext*              pCtx,
         pCurrSRB      = nullptr;
         pCurrMaterial = nullptr;
 
-        const bool IsTransmissionList = RenderListId == RENDER_LIST_TRANSMISSION;
-        const std::vector<PrimitiveRenderInfo>& RenderList = m_RenderLists[RenderListId];
+        const bool                              IsTransmissionList = RenderListId == RENDER_LIST_TRANSMISSION;
+        const std::vector<PrimitiveRenderInfo>& RenderList         = m_RenderLists[RenderListId];
         for (const PrimitiveRenderInfo& PrimRI : RenderList)
         {
             VERIFY_EXPR(PrimRI.Node != nullptr && PrimRI.Primitive != nullptr);
             const GLTF::Node&      Node                 = *PrimRI.Node;
             const GLTF::Primitive& primitive            = *PrimRI.Primitive;
             const GLTF::Material&  material             = GLTFModel.Materials[primitive.MaterialId];
-            const auto AlphaMode = static_cast<GLTF::Material::ALPHA_MODE>(material.Attribs.AlphaMode);
+            const auto             AlphaMode            = static_cast<GLTF::Material::ALPHA_MODE>(material.Attribs.AlphaMode);
             const float4x4&        NodeGlobalMatrix     = Transforms.NodeGlobalMatrices[Node.Index];
             const float4x4&        PrevNodeGlobalMatrix = PrevTransforms->NodeGlobalMatrices[Node.Index];
 
@@ -685,6 +668,9 @@ void GLTF_PBR_Renderer::Render(IDeviceContext*              pCtx,
             }
 
             PSOFlags &= RenderParams.Flags;
+            PSOFlags &= GetEnabledPSOFlags(m_Settings);
+            if ((PSOFlags & PSO_FLAG_ENABLE_TRANSMISSION) == 0)
+                PSOFlags &= ~PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE;
             const bool IsTransmissionComposite = (PSOFlags & PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE) != PSO_FLAG_NONE;
 
             if (RenderParams.Wireframe)
@@ -789,8 +775,15 @@ void GLTF_PBR_Renderer::Render(IDeviceContext*              pCtx,
                         &NodeTransform,
                         &PrevNodeTransform,
                         static_cast<Uint32>(JointCount),
+                        0,
+                        static_cast<Uint32>(JointCount),
                     };
-                    void* pEndPtr = WritePBRPrimitiveShaderAttribs(pAttribsData, AttribsData, !m_Settings.PackMatrixRowMajor, m_Settings.UseSkinPreTransform);
+                    void* pEndPtr = WritePBRPrimitiveShaderAttribs(pAttribsData,
+                                                                   AttribsData,
+                                                                   !m_Settings.PackMatrixRowMajor,
+                                                                   m_Settings.UseSkinPreTransform,
+                                                                   m_Settings.VertexPosPackMode,
+                                                                   m_Settings.MaxActiveMorphTargetCount);
 
                     VERIFY(reinterpret_cast<uint8_t*>(pEndPtr) <= static_cast<uint8_t*>(pAttribsData) + m_PBRPrimitiveAttribsCB->GetDesc().Size,
                            "Not enough space in the buffer to store primitive attributes");
@@ -818,6 +811,8 @@ void GLTF_PBR_Renderer::Render(IDeviceContext*              pCtx,
                         m_Settings.TextureAttribIndices,
                         material,
                     };
+                    if (IsTransmissionComposite)
+                        AttribsData.TransmissionSceneColorMipCount = RenderParams.pTransmissionSceneColorSRV->GetDesc().NumMipLevels;
                     void* pEndPtr = WritePBRMaterialShaderAttribs(pAttribsData, AttribsData);
 
                     VERIFY(reinterpret_cast<uint8_t*>(pEndPtr) <= static_cast<uint8_t*>(pAttribsData) + m_PBRMaterialAttribsCB->GetDesc().Size,
@@ -871,7 +866,9 @@ Uint8* WriteShaderAttribs(Uint8* pDstPtr, HostStructType* pSrc, const char* Debu
 void* GLTF_PBR_Renderer::WritePBRPrimitiveShaderAttribs(void*                                pDstShaderAttribs,
                                                         const PBRPrimitiveShaderAttribsData& AttribsData,
                                                         bool                                 TransposeMatrices,
-                                                        bool                                 UseSkinPreTransform)
+                                                        bool                                 UseSkinPreTransform,
+                                                        VERTEX_POS_PACK_MODE                 VertexPosPackMode,
+                                                        Uint32                               MaxActiveMorphTargetCount)
 {
     // When adding new members, don't forget to update PBR_Renderer::GetPBRPrimitiveAttribsSize!
 
@@ -882,19 +879,34 @@ void* GLTF_PBR_Renderer::WritePBRPrimitiveShaderAttribs(void*                   
     //        float4x4 NodeMatrix;
     //        float4x4 PrevNodeMatrix; // #if COMPUTE_MOTION_VECTORS
     //
-    //        int   JointCount;
-    //        int   FirstJoint;
-    //        float PosBiasX;
-    //        float PosBiasY;
+    //        struct GLTFNodeSkinningShaderAttribs // #if USE_JOINTS
+    //        {
+    //            int JointCount;
+    //            int FirstJoint;
+    //            int PrevFirstJoint;
+    //            int Padding;
     //
-    //        float PosBiasZ;
-    //        float PosScaleX;
-    //        float PosScaleY;
-    //        float PosScaleZ;
-    //
-    //        float4x4 SkinPreTransform;     // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM
-    //        float4x4 PrevSkinPreTransform; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
+    //            float4x4 PreTransform;     // #if USE_SKIN_PRE_TRANSFORM
+    //            float4x4 PrevPreTransform; // #if USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
+    //        } Skinning;
     //    } Transforms;
+    //
+    //    struct PBRMorphTargetsShaderAttribs // #if USE_MORPH_TARGETS
+    //    {
+    //        uint VertexOffset;
+    //        uint Padding0;
+    //        uint Padding1;
+    //        uint Padding2;
+    //
+    //        PBRMorphTargetShaderAttribs Targets[MAX_ACTIVE_MORPH_TARGET_COUNT];
+    //        PBRMorphTargetShaderAttribs PrevTargets[MAX_ACTIVE_MORPH_TARGET_COUNT]; // #if COMPUTE_MOTION_VECTORS
+    //    } MorphTargets;
+    //
+    //    struct PBRVertexPositionUnpackShaderAttribs // #if VERTEX_POS_PACK_MODE != VERTEX_POS_PACK_MODE_NONE
+    //    {
+    //        float4 Bias;
+    //        float4 Scale;
+    //    } PositionUnpack;
     //
     //    float4      FallbackColor;
     //    UserDefined CustomData;
@@ -930,44 +942,93 @@ void* GLTF_PBR_Renderer::WritePBRPrimitiveShaderAttribs(void*                   
             pDstPtr += sizeof(float4x4);
         }
 
-        WriteValue(static_cast<int>(AttribsData.JointCount));
-        WriteValue(static_cast<int>(AttribsData.FirstJoint));
+        const bool UseJoints = (AttribsData.PSOFlags & PSO_FLAG_USE_JOINTS) != 0;
+        if (UseJoints)
+        {
+            WriteValue(static_cast<int>(AttribsData.JointCount));
+            WriteValue(static_cast<int>(AttribsData.FirstJoint));
+            WriteValue(static_cast<int>(AttribsData.PrevFirstJoint));
+            WriteValue(0);
 
+            if (UseSkinPreTransform)
+            {
+                if (AttribsData.SkinPreTransform != nullptr)
+                {
+                    WriteShaderMatrix(pDstPtr, *AttribsData.SkinPreTransform, TransposeMatrices);
+                }
+                else
+                {
+                    UNEXPECTED("Skin pre-transform matrix must not be null");
+                }
+                pDstPtr += sizeof(float4x4);
+
+                if (AttribsData.PSOFlags & PSO_FLAG_COMPUTE_MOTION_VECTORS)
+                {
+                    if (AttribsData.PrevSkinPreTransform != nullptr)
+                    {
+                        WriteShaderMatrix(pDstPtr, *AttribsData.PrevSkinPreTransform, TransposeMatrices);
+                    }
+                    else
+                    {
+                        UNEXPECTED("Previous skin pre-transform matrix must not be null");
+                    }
+                    pDstPtr += sizeof(float4x4);
+                }
+            }
+        }
+    }
+
+    if ((AttribsData.PSOFlags & PSO_FLAG_USE_MORPH_TARGETS) != 0 && MaxActiveMorphTargetCount != 0)
+    {
+        WriteValue(AttribsData.MorphTargetVertexOffset);
+        WriteValue(Uint32{0});
+        WriteValue(Uint32{0});
+        WriteValue(Uint32{0});
+
+        static_assert(sizeof(MorphTargetShaderAttribs) == sizeof(float4), "Unexpected morph target shader attributes size");
+        const auto WriteMorphTargetPalette = [&](const MorphTargetShaderAttribs* pTargets, Uint32 TargetCount) {
+            if (TargetCount > MaxActiveMorphTargetCount)
+            {
+                UNEXPECTED("Active morph target count (", TargetCount, ") exceeds the renderer limit (", MaxActiveMorphTargetCount, ')');
+                TargetCount = MaxActiveMorphTargetCount;
+            }
+            if (TargetCount != 0 && pTargets == nullptr)
+            {
+                UNEXPECTED("Active morph target palette must not be null");
+                TargetCount = 0;
+            }
+
+            const MorphTargetShaderAttribs EmptyTarget{};
+            for (Uint32 TargetIndex = 0; TargetIndex < MaxActiveMorphTargetCount; ++TargetIndex)
+            {
+                const MorphTargetShaderAttribs& Target = TargetIndex < TargetCount ?
+                    pTargets[TargetIndex] :
+                    EmptyTarget;
+                std::memcpy(pDstPtr, &Target, sizeof(Target));
+                pDstPtr += sizeof(Target);
+            }
+        };
+
+        WriteMorphTargetPalette(AttribsData.pActiveMorphTargets, AttribsData.ActiveMorphTargetCount);
+        if ((AttribsData.PSOFlags & PSO_FLAG_COMPUTE_MOTION_VECTORS) != 0)
+        {
+            WriteMorphTargetPalette(AttribsData.pPrevActiveMorphTargets, AttribsData.PrevActiveMorphTargetCount);
+        }
+    }
+
+    if (VertexPosPackMode != VERTEX_POS_PACK_MODE_NONE)
+    {
         const float3& PosBias = AttribsData.PosBias != nullptr ? *AttribsData.PosBias : float3{0, 0, 0};
         WriteValue(PosBias.x);
         WriteValue(PosBias.y);
         WriteValue(PosBias.z);
+        WriteValue(0.f);
 
         const float3& PosScale = AttribsData.PosScale != nullptr ? *AttribsData.PosScale : float3{1, 1, 1};
         WriteValue(PosScale.x);
         WriteValue(PosScale.y);
         WriteValue(PosScale.z);
-
-        if (UseSkinPreTransform && (AttribsData.PSOFlags & PSO_FLAG_USE_JOINTS))
-        {
-            if (AttribsData.SkinPreTransform != nullptr)
-            {
-                WriteShaderMatrix(pDstPtr, *AttribsData.SkinPreTransform, TransposeMatrices);
-            }
-            else
-            {
-                UNEXPECTED("Skin pre-transform matrix must not be null");
-            }
-            pDstPtr += sizeof(float4x4);
-
-            if (AttribsData.PSOFlags & PSO_FLAG_COMPUTE_MOTION_VECTORS)
-            {
-                if (AttribsData.PrevSkinPreTransform != nullptr)
-                {
-                    WriteShaderMatrix(pDstPtr, *AttribsData.PrevSkinPreTransform, TransposeMatrices);
-                }
-                else
-                {
-                    UNEXPECTED("Previous skin pre-transform matrix must not be null");
-                }
-                pDstPtr += sizeof(float4x4);
-            }
-        }
+        WriteValue(0.f);
     }
 
     {
@@ -997,6 +1058,7 @@ void* GLTF_PBR_Renderer::WritePBRMaterialShaderAttribs(void*                    
     // {
     //     PBRMaterialBasicAttribs        Basic;
     //     PBRMaterialSheenAttribs        Sheen;        // #if ENABLE_SHEEN
+    //     PBRMaterialSpecularAttribs     Specular;     // #if ENABLE_SPECULAR
     //     PBRMaterialAnisotropyAttribs   Anisotropy;   // #if ENABLE_ANISOTROPY
     //     PBRMaterialIridescenceAttribs  Iridescence;  // #if ENABLE_IRIDESCENCE
     //     PBRMaterialTransmissionAttribs Transmission; // #if ENABLE_TRANSMISSION
@@ -1015,6 +1077,11 @@ void* GLTF_PBR_Renderer::WritePBRMaterialShaderAttribs(void*                    
         pDstPtr = WriteShaderAttribs<HLSL::PBRMaterialSheenAttribs>(pDstPtr, Material.Sheen.get(), "Sheen Attribs");
     }
 
+    if (AttribsData.PSOFlags & PSO_FLAG_ENABLE_SPECULAR)
+    {
+        pDstPtr = WriteShaderAttribs<HLSL::PBRMaterialSpecularAttribs>(pDstPtr, Material.Specular.get(), "Specular Attribs");
+    }
+
     if (AttribsData.PSOFlags & PSO_FLAG_ENABLE_ANISOTROPY)
     {
         pDstPtr = WriteShaderAttribs<HLSL::PBRMaterialAnisotropyAttribs>(pDstPtr, Material.Anisotropy.get(), "Anisotropy Attribs");
@@ -1027,7 +1094,9 @@ void* GLTF_PBR_Renderer::WritePBRMaterialShaderAttribs(void*                    
 
     if (AttribsData.PSOFlags & PSO_FLAG_ENABLE_TRANSMISSION)
     {
-        pDstPtr = WriteShaderAttribs<HLSL::PBRMaterialTransmissionAttribs>(pDstPtr, Material.Transmission.get(), "Transmission Attribs");
+        auto* pTransmission             = reinterpret_cast<HLSL::PBRMaterialTransmissionAttribs*>(pDstPtr);
+        pDstPtr                         = WriteShaderAttribs<HLSL::PBRMaterialTransmissionAttribs>(pDstPtr, Material.Transmission.get(), "Transmission Attribs");
+        pTransmission->SceneColorMaxMip = static_cast<float>(std::max(AttribsData.TransmissionSceneColorMipCount, 1u) - 1u);
     }
 
     if (AttribsData.PSOFlags & PSO_FLAG_ENABLE_VOLUME)
@@ -1051,7 +1120,7 @@ void* GLTF_PBR_Renderer::WritePBRMaterialShaderAttribs(void*                    
 
                                  static_assert(sizeof(HLSL::PBRMaterialTextureAttribs) == sizeof(GLTF::Material::TextureShaderAttribs),
                                                "The sizeof(HLSL::PBRMaterialTextureAttribs) is inconsistent with sizeof(GLTF::Material::TextureShaderAttribs)");
-                                 memcpy(pDstTextures + CurrIndex, &Material.GetTextureAttrib(SrcAttribIndex), sizeof(HLSL::PBRMaterialTextureAttribs));
+                                 memcpy(pDstTextures + CurrIndex, &Material.GetTextureAttrib(SrcAttribIndex).ShaderAttribs, sizeof(HLSL::PBRMaterialTextureAttribs));
                                  ++NumTextureAttribs;
                              });
 

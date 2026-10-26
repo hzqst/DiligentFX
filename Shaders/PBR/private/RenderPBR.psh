@@ -88,7 +88,7 @@ Texture2D<float4>      g_OITTail;
 PBRMaterialTextureAttribs GetDefaultTextureAttribs()
 {
     PBRMaterialTextureAttribs Attribs;
-    Attribs.PackedProps  = 0u;
+    Attribs.PackedProps  = 15u << 9u; // UV selector = -1, repeat wrapping, no additional mip limit.
     Attribs.TextureSlice = 0.0;
     Attribs.UBias        = 0.0;
     Attribs.VBias        = 0.0;
@@ -154,6 +154,7 @@ BaseLayerShadingInfo ReadBaseLayerProperties(in VSOutput              VSOut,
     
     float3 TSNormal     = GetMicroNormal(Material, NMUVInfo.UV, NMUVInfo.SmoothUV, NMUVInfo.dUV_dx, NMUVInfo.dUV_dy, g_Frame.Renderer.MipBias);
     float4 PhysicalDesc = GetPhysicalDesc(VSOut, Material, g_Frame.Renderer.MipBias);
+    float4 Specular     = GetSpecular(VSOut, Material, g_Frame.Renderer.MipBias);
     
     PBRMaterialBasicAttribs BasicAttribs = Material.Basic;
     if (BasicAttribs.Workflow == PBR_WORKFLOW_SPECULAR_GLOSSINESS)
@@ -168,8 +169,8 @@ BaseLayerShadingInfo ReadBaseLayerProperties(in VSOutput              VSOut,
         PhysicalDesc.g *= BasicAttribs.SpecularFactorG;
         PhysicalDesc.b *= BasicAttribs.SpecularFactorB;
 
-        const float u_GlossinessFactor = 1.0;
-        PhysicalDesc.a *= u_GlossinessFactor;
+        // RoughnessFactor stores glossiness factor for this workflow.
+        PhysicalDesc.a *= BasicAttribs.RoughnessFactor;
     }
     else if (BasicAttribs.Workflow == PBR_WORKFLOW_METALLIC_ROUGHNESS)
     {
@@ -178,7 +179,12 @@ BaseLayerShadingInfo ReadBaseLayerProperties(in VSOutput              VSOut,
         PhysicalDesc.b = saturate(PhysicalDesc.b * BasicAttribs.MetallicFactor);
     }
     Base.Metallic = 0.0;
-    Base.Srf = GetSurfaceReflectance(BasicAttribs.Workflow, BaseColor, PhysicalDesc, Base.Metallic);
+    Base.Srf = GetSurfaceReflectance(BasicAttribs.Workflow, BaseColor, PhysicalDesc,
+                                     Specular.rgb, Specular.a, Base.Metallic);
+#if ENABLE_SPECULAR
+    Base.SpecularColorFactor = Specular.rgb;
+    Base.SpecularFactor      = Specular.a;
+#endif
     
     Base.Normal = PerturbNormal(NormalInfo,
                                 NMUVInfo.dUV_dx,
@@ -241,20 +247,38 @@ SheenShadingInfo ReadSheenLayerProperties(in VSOutput              VSOut,
 #endif
 
 #if ENABLE_IRIDESCENCE
-IridescenceShadingInfo ReadIridescenceProperties(in VSOutput              VSOut, 
-                                                 in PBRMaterialShaderInfo Material,
-                                                 in BaseLayerShadingInfo  BaseLayer)
+IridescenceShadingInfo ReadIridescenceProperties(in    VSOutput              VSOut,
+                                                 in    PBRMaterialShaderInfo Material,
+                                                 inout BaseLayerShadingInfo  BaseLayer,
+                                                 in    float3                BaseColor)
 {
     IridescenceShadingInfo Iridescence;
-    
-    Iridescence.Factor    = GetIridescence(VSOut, Material, g_Frame.Renderer.MipBias);
+    Iridescence.Thickness = 0.0;
+
+    if (Material.Iridescence.Factor <= 0.0)
+        return Iridescence;
+
+    float IridescenceFactor = GetIridescence(VSOut, Material, g_Frame.Renderer.MipBias);
+    if (IridescenceFactor <= 0.0)
+        return Iridescence;
+
     Iridescence.Thickness = GetIridescenceThickness(VSOut, Material, g_Frame.Renderer.MipBias);
+    if (Iridescence.Thickness <= 0.0)
+        return Iridescence;
 
-    Iridescence.Fresnel = EvalIridescence(1.0, Material.Iridescence.IOR, BaseLayer.NdotV, Iridescence.Thickness, BaseLayer.Srf.Reflectance0);
-    Iridescence.F0      = SchlickToF0(BaseLayer.NdotV, Iridescence.Fresnel, float3(1.0, 1.0, 1.0));
+    float3 DielectricF0 = BaseLayer.Srf.Reflectance0;
+    float3 MetallicF0   = BaseLayer.Srf.Reflectance0;
+    if (Material.Basic.Workflow == PBR_WORKFLOW_METALLIC_ROUGHNESS)
+    {
+        DielectricF0 = float3(0.04, 0.04, 0.04);
+        MetallicF0   = BaseColor;
+    }
 
-    if (Iridescence.Thickness == 0.0)
-        Iridescence.Factor = 0.0;
+    float3 FresnelDielectric = EvalIridescence(1.0, Material.Iridescence.IOR, BaseLayer.NdotV, Iridescence.Thickness, DielectricF0);
+    float3 FresnelMetallic   = EvalIridescence(1.0, Material.Iridescence.IOR, BaseLayer.NdotV, Iridescence.Thickness, MetallicF0);
+
+    BaseLayer.Srf.IridescenceFresnel = lerp(FresnelDielectric, FresnelMetallic, BaseLayer.Metallic);
+    BaseLayer.Srf.IridescenceFactor  = IridescenceFactor;
 
     return Iridescence;
 }
@@ -263,7 +287,9 @@ IridescenceShadingInfo ReadIridescenceProperties(in VSOutput              VSOut,
 #if ENABLE_ANISOTROPY
 AnisotropyShadingInfo ReadAnisotropyProperties(in VSOutput              VSOut,
                                                in PBRMaterialShaderInfo Material,
-                                               in BaseLayerShadingInfo  BaseLayer)
+                                               in BaseLayerShadingInfo  BaseLayer,
+                                               in PerturbNormalInfo     NormalInfo,
+                                               in NormalMapUVInfo       NMUVInfo)
 {
     float3 PackedAnisotropy = GetAnisotropy(VSOut, Material, g_Frame.Renderer.MipBias);
 
@@ -278,23 +304,42 @@ AnisotropyShadingInfo ReadAnisotropyProperties(in VSOutput              VSOut,
     Anisotropy.Direction = Direction;
     Anisotropy.Strength  = PackedAnisotropy.z;
     
-    float3 Tangent = float3(1.0, 0.0, 0.0);
+    float3 Tangent;
 #   if USE_VERTEX_TANGENTS
     {
-        Tangent = VSOut.Tangent;
+        float3 SurfaceNormal = NormalInfo.Normal * NormalInfo.Face;
+        Tangent = normalize(VSOut.Tangent - SurfaceNormal * dot(SurfaceNormal, VSOut.Tangent));
+        Tangent *= NormalInfo.Face;
     }
 #   else
     {
-        // GLTF spec states that SamplerName all meshes with materials that use anisotropy SHOULD supply TANGENT vectors as a mesh attribute.
+        // The glTF specification requires a tangent space for anisotropic
+        // materials. Reconstruct it from the normal-map UVs when the mesh does
+        // not provide tangents.
         // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_anisotropy#anisotropy
-        // If tangent attribute is not supplied, tangents should be computed from screen-space derivatives.
-        // However, such tangents may be discontinuous (normals are always continuous), so we don't use them.
+        float d = NMUVInfo.dUV_dx.x * NMUVInfo.dUV_dy.y - NMUVInfo.dUV_dy.x * NMUVInfo.dUV_dx.y;
+        if (d != 0.0)
+        {
+            Tangent = PerturbNormal(NormalInfo,
+                                    NMUVInfo.dUV_dx,
+                                    NMUVInfo.dUV_dy,
+                                    float3(1.0, 0.0, 0.0),
+                                    true);
+        }
+        else
+        {
+            float3 UnusedBitangent;
+            BasisFromNormal(NormalInfo.Normal, Tangent, UnusedBitangent);
+        }
     }
 #   endif
-    float3 Bitangent = cross(Tangent, BaseLayer.Normal);
-    
-    Anisotropy.Tangent   = normalize(mul(float3(Direction, 0.0), MatrixFromRows(Tangent, Bitangent, BaseLayer.Normal)));
-    Anisotropy.Bitangent = cross(BaseLayer.Normal, Anisotropy.Tangent);
+
+    // Anisotropy is defined in the geometric tangent frame. Keep this frame
+    // independent of normal-map detail and renormalize it after interpolation.
+    float3 Bitangent = cross(NormalInfo.Normal, Tangent) * NormalInfo.Face;
+
+    Anisotropy.Tangent   = normalize(Direction.x * Tangent + Direction.y * Bitangent);
+    Anisotropy.Bitangent = cross(NormalInfo.Normal, Anisotropy.Tangent);
 
     // Roughness along the anisotropy bitangent is the material roughness, while the tangent roughness increases with anisotropy.
     Anisotropy.AlphaRoughnessT = lerp(BaseLayer.Srf.PerceptualRoughness * BaseLayer.Srf.PerceptualRoughness, 1.0, Anisotropy.Strength * Anisotropy.Strength);
@@ -337,17 +382,13 @@ SurfaceShadingInfo GetSurfaceShadingInfo(in VSOutput              VSOut,
     
 #   if ENABLE_ANISOTROPY
     {
-        Shading.Anisotropy = ReadAnisotropyProperties(VSOut, Material, Shading.BaseLayer);
+        Shading.Anisotropy = ReadAnisotropyProperties(VSOut, Material, Shading.BaseLayer, NormalInfo, NMUVInfo);
     }
 #   endif
     
 #   if ENABLE_IRIDESCENCE
     {
-        Shading.Iridescence = ReadIridescenceProperties(VSOut, Material, Shading.BaseLayer);
-    
-        Shading.BaseLayer.Srf.Reflectance0 = lerp(Shading.BaseLayer.Srf.Reflectance0,
-                                                  Shading.Iridescence.F0,
-                                                  float3(Shading.Iridescence.Factor, Shading.Iridescence.Factor, Shading.Iridescence.Factor));
+        Shading.Iridescence = ReadIridescenceProperties(VSOut, Material, Shading.BaseLayer, BaseColor.rgb);
     }
 #   endif
     
@@ -477,6 +518,11 @@ PSOutput main(in VSOutput VSOut,
         discard;
     }
 #   endif
+    if (BasicAttribs.AlphaMode == PBR_ALPHA_MODE_MASK)
+    {
+        // Surviving masked fragments have full coverage.
+        CoverageAlpha = 1.0;
+    }
 
 #   if DEBUG_VIEW == DEBUG_VIEW_WHITE_BASE_COLOR
     {
@@ -499,8 +545,8 @@ PSOutput main(in VSOutput VSOut,
                     Shading,
                     g_Frame.Lights[i],
 #                   if ENABLE_SHEEN
-                        g_SheenAlbedoScalingLUT,
-                        g_SheenAlbedoScalingLUT_sampler,
+                        g_PreintegratedSheen,
+                        g_PreintegratedSheen_sampler,
 #                   endif
 #                   if ENABLE_SHADOWS
                         g_ShadowMap,
@@ -514,12 +560,13 @@ PSOutput main(in VSOutput VSOut,
         
 #       if USE_IBL
         {
-            ApplyIBL(Shading, float(g_Frame.Renderer.PrefilteredCubeLastMip),
+            ApplyIBL(Shading, float(g_Frame.Renderer.PrefilteredCubeLastMip), g_Frame.Renderer.EnvironmentRotation,
                      g_PreintegratedGGX,  g_PreintegratedGGX_sampler,
                      g_IrradianceMap,     g_IrradianceMap_sampler,
                      g_PrefilteredEnvMap, g_PrefilteredEnvMap_sampler,
 #                    if ENABLE_SHEEN
-                         g_PreintegratedCharlie, g_PreintegratedCharlie_sampler,
+                         g_PreintegratedSheen, g_PreintegratedSheen_sampler,
+                         g_PrefilteredSheenEnvMap, g_PrefilteredSheenEnvMap_sampler,
 #                    endif
                      SrfLighting);
         }
@@ -528,13 +575,10 @@ PSOutput main(in VSOutput VSOut,
         OutColor.rgb = ResolveLighting(Shading, SrfLighting);
 #       if ENABLE_TRANSMISSION && ENABLE_TRANSMISSION_COMPOSITE
         {
-            uint TransmissionSceneColorWidth;
-            uint TransmissionSceneColorHeight;
-            uint TransmissionSceneColorMipCount;
-            g_TransmissionSceneColor.GetDimensions(0, TransmissionSceneColorWidth, TransmissionSceneColorHeight, TransmissionSceneColorMipCount);
-
             float2 ScreenUV = VSOut.ClipPos.xy * g_Frame.Camera.f4ViewportSize.zw;
-            float  MaxMip   = float(TransmissionSceneColorMipCount > 0u ? TransmissionSceneColorMipCount - 1u : 0u);
+            // Use the view's mip count supplied by the CPU: GLSL conversion may
+            // substitute zero for textureQueryLevels on supported GL profiles.
+            float  MaxMip   = g_Material.Transmission.SceneColorMaxMip;
             float  LOD      = saturate(Shading.BaseLayer.Srf.PerceptualRoughness) * MaxMip;
             float3 Transmitted = g_TransmissionSceneColor.SampleLevel(g_LinearClampSampler, ScreenUV, LOD).rgb * BaseColor.rgb;
 

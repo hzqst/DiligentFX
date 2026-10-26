@@ -122,7 +122,9 @@ public:
         /// Average log luminance for tone mapping.
         float AverageLogLum = 1;
 
-        /// Mip level of the environment map to use.
+        /// Mip level of the environment map to use. Fractional levels blend
+        /// adjacent mips. For atlas regions, the caller must limit this value
+        /// to the region's valid mip range.
         float MipLevel = 0;
 
         /// Alpha value to write to the output render target.
@@ -133,6 +135,22 @@ public:
 
         /// Scaling factor to apply to the environment map.
         float3 Scale = {1, 1, 1};
+
+        /// Horizontal orientation of the environment, in radians. Rotation is
+        /// around the positive Y axis; positive angles rotate +X toward -Z.
+        float Yaw = 0;
+
+        /// UV scale and bias used to address a sphere map in its backing
+        /// texture. The identity transform samples the full image.
+        float4 SphereMapUVScaleBias = {1, 1, 0, 0};
+
+        /// Array slice containing a sphere map. Ignored for cube and
+        /// Texture2D source views.
+        float SphereMapSlice = 0;
+
+        /// Whether row 0 of a sphere map represents the negative Y direction.
+        /// Ignored for cube maps.
+        bool SphereMapRow0IsNegativeY = false;
     };
 
     /// Prepares the environment map renderer for rendering.
@@ -150,6 +168,7 @@ private:
         {
             ENV_MAP_TYPE_CUBE = 0,
             ENV_MAP_TYPE_SPHERE,
+            ENV_MAP_TYPE_SPHERE_ARRAY,
             ENV_MAP_TYPE_COUNT
         };
 
@@ -180,7 +199,15 @@ private:
             }
         };
     };
+
+    struct SRBData
+    {
+        RefCntAutoPtr<IShaderResourceBinding> pSRB;
+        IShaderResourceVariable*              pEnvMapVar = nullptr;
+    };
+
     IPipelineState* GetPSO(const PSOKey& Key);
+    SRBData*        GetSRBData(PSOKey::ENV_MAP_TYPE EnvMapType, IPipelineState* pPSO);
 
     RefCntAutoPtr<IRenderDevice>     m_pDevice;
     RefCntAutoPtr<IRenderStateCache> m_pStateCache;
@@ -195,10 +222,12 @@ private:
 
     std::unordered_map<PSOKey, RefCntAutoPtr<IPipelineState>, PSOKey::Hasher> m_PSOs;
 
-    IPipelineState* m_pCurrentPSO = nullptr;
+    // Resource view dimensions are part of the shader resource contract.
+    // Other PSO key attributes do not affect SRB compatibility.
+    std::array<SRBData, PSOKey::ENV_MAP_TYPE_COUNT> m_SRBData;
 
-    RefCntAutoPtr<IShaderResourceBinding> m_SRB;
-    IShaderResourceVariable*              m_pEnvMapVar = nullptr;
+    IPipelineState* m_pCurrentPSO     = nullptr;
+    SRBData*        m_pCurrentSRBData = nullptr;
 
     struct EnvMapShaderAttribs;
     std::unique_ptr<EnvMapShaderAttribs> m_ShaderAttribs;

@@ -1,6 +1,9 @@
 #ifndef _ATLAS_SAMPLING_FXH_
 #define _ATLAS_SAMPLING_FXH_
 
+// Full mip chain for a 16384x16384 texture, including the base level.
+#define ATLAS_MAX_MIP_LEVEL_COUNT 15u
+
 /// Attributes of the SampleTextureAtlas function
 struct SampleTextureAtlasAttribs
 {
@@ -44,13 +47,22 @@ struct SampleTextureAtlasAttribs
     /// the atlas.
     float fSmallestValidLevelDim; /* = 4.0 */
 
+    /// Number of consecutive uploaded mip levels for the region, starting at mip zero.
+    /// Must be between 1 and ATLAS_MAX_MIP_LEVEL_COUNT. Use ATLAS_MAX_MIP_LEVEL_COUNT
+    /// to apply only the existing region-based sampling limits.
+    /// Explicit counts derive the LOD limit from the region dimensions and uploaded
+    /// mip count, assuming a full atlas mip chain in the texture view and no additional
+    /// sampler LOD clamps. The count must be uniform across invocations in a fragment quad.
+    uint MipLevelCount;
+
     /// Indicates if the texture data is non-filterable (e.g. material indices).
     bool IsNonFilterable;
     
     /// Maximum anisotropy.
     ///
-    /// \remarks    This value is only used on GLES where textureQueryLod is not
-    ///             supported and we have to manually compute the LOD.
+    /// \remarks    This value is only used on GLES and WebGPU, where we manually
+    ///             compute the LOD. It must match the sampler's maximum anisotropy
+    ///             when anisotropic filtering is enabled, and be 1 otherwise.
     float fMaxAnisotropy;
 };
 
@@ -76,29 +88,54 @@ float4 SampleTextureAtlas(Texture2DArray            Atlas,
     float2 f2AtlasDim;
     float  fElements;
     Atlas.GetDimensions(f2AtlasDim.x, f2AtlasDim.y, fElements);
+
+    float2 f2RegionDim      = f2AtlasDim * f4UVRegion.xy;
+    float  fLastUploadedLOD = float(Attribs.MipLevelCount - 1u);
+    if (Attribs.MipLevelCount < ATLAS_MAX_MIP_LEVEL_COUNT)
+    {
+        float fMaxRegionDim = max(f2RegionDim.x, f2RegionDim.y);
+
+        // Reconstructing integer texel dimensions from normalized UVs may produce a value
+        // slightly below the original (e.g. 127.99999 instead of 128). Round first so
+        // floor(log2(...)) does not underestimate the last mip level by one.
+        fMaxRegionDim = round(fMaxRegionDim);
+        fMaxRegionDim = max(fMaxRegionDim, 1.0);
+
+        float fLastRegionLOD = floor(log2(fMaxRegionDim));
+        fLastUploadedLOD = min(fLastUploadedLOD, fLastRegionLOD);
+    }
     
-    // Compute gradient lengths in pixels
-    float fGradX   = max(length(f2dUV_dx * f2AtlasDim.xy), 1e-5);
-    float fGradY   = max(length(f2dUV_dy * f2AtlasDim.xy), 1e-5);
-    float fMaxGrad = max(fGradX, fGradY);
+    // Compute the maximum gradient length in pixels
+    float2 f2GradX   = f2dUV_dx * f2AtlasDim;
+    float2 f2GradY   = f2dUV_dy * f2AtlasDim;
+    float  fGradXSqr = dot(f2GradX, f2GradX);
+    float  fGradYSqr = dot(f2GradY, f2GradY);
+    float  fMaxGrad  = max(sqrt(max(fGradXSqr, fGradYSqr)), 1e-5);
+    float  fMinGrad  = max(sqrt(min(fGradXSqr, fGradYSqr)), 1e-5); // Only used on GLES and WebGPU
     
     float LOD;
 #if !defined(GL_ES) && !defined(WEBGPU)
+    if (Attribs.MipLevelCount < ATLAS_MAX_MIP_LEVEL_COUNT)
     {
-        // Calculate the texture LOD using smooth coordinates
+        // Radient uses the region/upload limit with an unrestricted sampler LOD range.
+        // Use the unclamped footprint to reduce gradients only when that limit is exceeded.
+        LOD = Atlas.CalculateLevelOfDetailUnclamped(Atlas_sampler, Attribs.f2SmoothUV);
+    }
+    else
+    {
+        // Preserve sampler and texture-view limits when no uploaded-mip limit is supplied.
         LOD = Atlas.CalculateLevelOfDetail(Atlas_sampler, Attribs.f2SmoothUV);
     }
 #else
     {
         // textureQueryLod is not supported even in GLES3.2.
         // Follow Section 8.14 (Texture Minification) from OpenGL4.6 spec.
-        float fMinGrad = min(fGradX, fGradY);
-        float Aniso    = min(fMaxGrad / fMinGrad, Attribs.fMaxAnisotropy);
+        float Aniso = min(fMaxGrad / fMinGrad, Attribs.fMaxAnisotropy);
         LOD = log2(fMaxGrad / Aniso);
     }
 #endif
-    // NB: textureQueryLod may return negative values, so we need to clamp the LOD
-    LOD = max(LOD, 0.0);
+    float fMipGradScale = exp2(min(fLastUploadedLOD - LOD, 0.0));
+    LOD = clamp(LOD, 0.0, fLastUploadedLOD);
 
     // Make sure that texture filtering does not use samples outside of the texture region.
     // The margin must be no less than half the pixel size in the selected LOD.
@@ -117,7 +154,7 @@ float4 SampleTextureAtlas(Texture2DArray            Atlas,
     // |____________________|            <-------->
     //                                       abs(f2dUV_dx.x) + abs(f2dUV_dy.x)
     //
-    float2 f2GradientMargin = 0.5 * (abs(f2dUV_dx) + abs(f2dUV_dy));
+    float2 f2GradientMargin = 0.5 * (abs(f2dUV_dx) + abs(f2dUV_dy)) * fMipGradScale;
 
     float2 f2Margin = f2LodMargin + f2GradientMargin;
     // Limit the margin by 1/2 of the texture region size to prevent boundaries from overlapping.
@@ -143,7 +180,7 @@ float4 SampleTextureAtlas(Texture2DArray            Atlas,
     // Aligned placement
 
     // Compute the region's minimum dimension in pixels.
-    float fMinRegionDim = min(f2AtlasDim.x * f4UVRegion.x, f2AtlasDim.y * f4UVRegion.y);
+    float fMinRegionDim = min(f2RegionDim.x, f2RegionDim.y);
     // Avoid division by zero
     fMinRegionDim = max(fMinRegionDim, 1.0);
     // If the smallest valid level dimension is N, we should avoid the maximum gradient
@@ -154,14 +191,15 @@ float4 SampleTextureAtlas(Texture2DArray            Atlas,
     float fSmallestValidLevelDim = max(Attribs.fSmallestValidLevelDim, 2.0);
     float fMaxGradLimit = fMinRegionDim / fSmallestValidLevelDim;
 
-    // Smoothly fade-out to mean color when the gradient is in the range [fMaxGradLimit, fMaxGradLimit * 2.0]
+    // Smoothly fade-out to mean color when the gradient is in the range [fMaxGradLimit, fMaxGradLimit * 2.0].
+    // Keep this threshold based on region size so a missing mip tail does not make the fade start earlier.
     float fMeanColorFadeoutFactor = Attribs.IsNonFilterable ? 0.0 : saturate((fMaxGrad - fMaxGradLimit) / fMaxGradLimit);
     float4 f4Color = float4(0.0, 0.0, 0.0, 0.0);
 
     if (fMeanColorFadeoutFactor < 1.0)
     {
-        // Rescale the gradients to avoid sampling above the level with the smallest valid dimension.
-        float GradScale = min(1.0, fMaxGradLimit / max(fMaxGrad, 1e-5));
+        // Rescale the gradients to respect both region boundaries and the uploaded mip count.
+        float GradScale = min(fMipGradScale, fMaxGradLimit / max(fMaxGrad, 1e-5));
         f2dUV_dx *= GradScale;
         f2dUV_dy *= GradScale;
         f4Color = Atlas.SampleGrad(Atlas_sampler, float3(f2UV, Attribs.fSlice), f2dUV_dx, f2dUV_dy);
@@ -170,7 +208,7 @@ float4 SampleTextureAtlas(Texture2DArray            Atlas,
     if (fMeanColorFadeoutFactor > 0.0)
     {
         // Manually compute the mean color from the coarsest available level.
-        float LastValidLOD = log2(fMaxGradLimit);
+        float LastValidLOD = min(log2(fMaxGradLimit), fLastUploadedLOD);
         float4 f4MeanColor = (Atlas.SampleLevel(Atlas_sampler, float3(f4UVRegion.zw + float2(0.25, 0.25) * f4UVRegion.xy, Attribs.fSlice), LastValidLOD) +
                               Atlas.SampleLevel(Atlas_sampler, float3(f4UVRegion.zw + float2(0.75, 0.25) * f4UVRegion.xy, Attribs.fSlice), LastValidLOD) +
                               Atlas.SampleLevel(Atlas_sampler, float3(f4UVRegion.zw + float2(0.25, 0.75) * f4UVRegion.xy, Attribs.fSlice), LastValidLOD) +

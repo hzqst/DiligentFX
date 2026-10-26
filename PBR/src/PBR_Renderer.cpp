@@ -27,6 +27,7 @@
 #include "PBR_Renderer.hpp"
 
 #include <array>
+#include <cmath>
 #include <vector>
 #include <limits.h>
 
@@ -37,7 +38,6 @@
 #include "MapHelper.hpp"
 #include "GraphicsAccessories.hpp"
 #include "PlatformMisc.hpp"
-#include "TextureUtilities.h"
 #include "Utilities/interface/DiligentFXShaderSourceStreamFactory.hpp"
 #include "ShaderSourceFactoryUtils.hpp"
 
@@ -60,22 +60,27 @@ namespace HLSL
 
 } // namespace HLSL
 
-PBR_Renderer::PSOKey::PSOKey(RenderPassType       _Type,
-                             PSO_FLAGS            _Flags,
-                             ALPHA_MODE           _AlphaMode,
-                             CULL_MODE            _CullMode,
-                             DebugViewType        _DebugView,
-                             LoadingAnimationMode _LoadingAnimation,
-                             Uint64               _UserValue) noexcept :
-    Type{_Type},
+PBR_Renderer::PSOKey::PSOKey(RenderPassType                         _Type,
+                             PSO_FLAGS                              _Flags,
+                             ALPHA_MODE                             _AlphaMode,
+                             CULL_MODE                              _CullMode,
+                             DebugViewType                          _DebugView,
+                             LoadingAnimationMode                   _LoadingAnimation,
+                             Uint64                                 _UserValue,
+                             const StaticShaderTextureIdsArrayType* _pStaticShaderTextureIds) noexcept :
     Flags{_Flags},
+    Type{_Type},
     AlphaMode{_AlphaMode},
     CullMode{_CullMode},
     DebugView{_DebugView},
     LoadingAnimation{_LoadingAnimation},
+    HasStaticShaderTextureIds{_pStaticShaderTextureIds != nullptr},
     UserValue{_UserValue}
 {
-    static_assert(PSO_FLAG_LAST == Uint64{1} << Uint64{39}, "Please handle the new flag below, if necessary");
+    if (HasStaticShaderTextureIds)
+        StaticShaderTextureIds = *_pStaticShaderTextureIds;
+
+    static_assert(PSO_FLAG_LAST == Uint64{1} << Uint64{43}, "Please handle the new flag below, if necessary");
     static_assert(static_cast<size_t>(RenderPassType::Count) == 3, "Please handle the new render pass type below, if necessary");
     if (Type == RenderPassType::Shadow)
     {
@@ -84,6 +89,7 @@ PBR_Renderer::PSOKey::PSOKey(RenderPassType       _Type,
             PSO_FLAG_USE_TEXCOORD0 |
             PSO_FLAG_USE_TEXCOORD1 |
             PSO_FLAG_USE_JOINTS |
+            PSO_FLAG_USE_MORPH_TARGETS |
             PSO_FLAG_USE_TEXTURE_ATLAS |
             PSO_FLAG_ENABLE_TEXCOORD_TRANSFORM |
             PSO_FLAG_ALL_USER_DEFINED;
@@ -99,6 +105,7 @@ PBR_Renderer::PSOKey::PSOKey(RenderPassType       _Type,
             PSO_FLAG_USE_TEXCOORD0 |
             PSO_FLAG_USE_TEXCOORD1 |
             PSO_FLAG_USE_JOINTS |
+            PSO_FLAG_USE_MORPH_TARGETS |
             PSO_FLAG_USE_TEXTURE_ATLAS |
             PSO_FLAG_ENABLE_TEXCOORD_TRANSFORM;
         Flags &= OITLayersFlags;
@@ -119,13 +126,19 @@ PBR_Renderer::PSOKey::PSOKey(RenderPassType       _Type,
     {
         AlphaMode = ALPHA_MODE_OPAQUE;
 
-        constexpr PSO_FLAGS SupportedUnshadedFlags = PSO_FLAG_USE_JOINTS | PSO_FLAG_ALL_USER_DEFINED | PSO_FLAG_UNSHADED;
+        constexpr PSO_FLAGS SupportedUnshadedFlags =
+            PSO_FLAG_USE_JOINTS |
+            PSO_FLAG_USE_MORPH_TARGETS |
+            PSO_FLAG_ALL_USER_DEFINED |
+            PSO_FLAG_UNSHADED;
         Flags &= SupportedUnshadedFlags;
 
         DebugView = DebugViewType::None;
     }
 
-    Hash = ComputeHash(Type, Flags, AlphaMode, CullMode, static_cast<Uint32>(DebugView), static_cast<Uint32>(LoadingAnimation), UserValue);
+    Hash = ComputeHash(Type, Flags, AlphaMode, CullMode, static_cast<Uint32>(DebugView), static_cast<Uint32>(LoadingAnimation), UserValue, HasStaticShaderTextureIds);
+    if (HasStaticShaderTextureIds)
+        HashCombine(Hash, ComputeHashRaw(StaticShaderTextureIds.data(), StaticShaderTextureIds.size() * sizeof(StaticShaderTextureIds[0])));
 }
 
 static const char* GetTextureAttribString(PBR_Renderer::TEXTURE_ATTRIB_ID Id)
@@ -150,7 +163,9 @@ static const char* GetTextureAttribString(PBR_Renderer::TEXTURE_ATTRIB_ID Id)
             AttribStrings[PBR_Renderer::TEXTURE_ATTRIB_ID_IRIDESCENCE_THICKNESS] = "IridescenceThickness";
             AttribStrings[PBR_Renderer::TEXTURE_ATTRIB_ID_TRANSMISSION]          = "Transmission";
             AttribStrings[PBR_Renderer::TEXTURE_ATTRIB_ID_THICKNESS]             = "Thickness";
-            static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 17, "Not all texture names are initialized");
+            AttribStrings[PBR_Renderer::TEXTURE_ATTRIB_ID_SPECULAR]              = "Specular";
+            AttribStrings[PBR_Renderer::TEXTURE_ATTRIB_ID_SPECULAR_COLOR]        = "SpecularColor";
+            static_assert(PBR_Renderer::TEXTURE_ATTRIB_ID_COUNT == 19, "Not all texture names are initialized");
             return AttribStrings;
         }();
     return TextureAttribStrings[Id];
@@ -199,6 +214,9 @@ std::string PBR_Renderer::GetPSOFlagsString(PSO_FLAGS Flags)
             case PSO_FLAG_USE_IRIDESCENCE_MAP:           FlagsStr += "IRIDESCENCE_MAP"; break;
             case PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP: FlagsStr += "IRIDESCENCE_THICKNESS_MAP"; break;
             case PSO_FLAG_USE_TRANSMISSION_MAP:          FlagsStr += "TRANSMISSION_MAP"; break;
+            case PSO_FLAG_USE_THICKNESS_MAP:             FlagsStr += "THICKNESS_MAP"; break;
+            case PSO_FLAG_USE_SPECULAR_MAP:              FlagsStr += "SPECULAR_MAP"; break;
+            case PSO_FLAG_USE_SPECULAR_COLOR_MAP:        FlagsStr += "SPECULAR_COLOR_MAP"; break;
 
             case PSO_FLAG_USE_VERTEX_COLORS:   FlagsStr += "VERTEX_COLORS"; break;
             case PSO_FLAG_USE_VERTEX_NORMALS:  FlagsStr += "VERTEX_NORMALS"; break;
@@ -210,9 +228,9 @@ std::string PBR_Renderer::GetPSOFlagsString(PSO_FLAGS Flags)
             case PSO_FLAG_ENABLE_SHEEN:        FlagsStr += "SHEEN"; break;
             case PSO_FLAG_ENABLE_ANISOTROPY:   FlagsStr += "ANISOTROPY"; break;
             case PSO_FLAG_ENABLE_IRIDESCENCE:  FlagsStr += "IRIDESCENCE"; break;
-            case PSO_FLAG_ENABLE_TRANSMISSION:           FlagsStr += "TRANSMISSION"; break;
-            case PSO_FLAG_ENABLE_VOLUME:                 FlagsStr += "VOLUME"; break;
-            case PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE: FlagsStr += "TRANSMISSION_COMPOSITE"; break;
+            case PSO_FLAG_ENABLE_TRANSMISSION: FlagsStr += "TRANSMISSION"; break;
+            case PSO_FLAG_ENABLE_VOLUME:       FlagsStr += "VOLUME"; break;
+            case PSO_FLAG_ENABLE_SPECULAR:     FlagsStr += "SPECULAR"; break;
 
             case PSO_FLAG_USE_IBL:                   FlagsStr += "IBL"; break;
             case PSO_FLAG_USE_LIGHTS:                FlagsStr += "LIGHTS"; break;
@@ -224,13 +242,15 @@ std::string PBR_Renderer::GetPSOFlagsString(PSO_FLAGS Flags)
             case PSO_FLAG_UNSHADED:                  FlagsStr += "UNSHADED"; break;
             case PSO_FLAG_COMPUTE_MOTION_VECTORS:    FlagsStr += "MOTION_VECTORS"; break;
             case PSO_FLAG_ENABLE_SHADOWS:            FlagsStr += "SHADOWS"; break;
+            case PSO_FLAG_USE_MORPH_TARGETS:         FlagsStr += "MORPH_TARGETS"; break;
+            case PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE: FlagsStr += "TRANSMISSION_COMPOSITE"; break;
                 // clang-format on
 
             default:
                 FlagsStr += std::to_string(PlatformMisc::GetLSB(Flag));
         }
     }
-    static_assert(PSO_FLAG_LAST == 1ull << 39ull, "Please update the switch above to handle the new flag");
+    static_assert(PSO_FLAG_LAST == 1ull << 43ull, "Please update the switch above to handle the new flag");
 
     return FlagsStr;
 }
@@ -284,11 +304,68 @@ void ProcessCubemapFaces(IDeviceContext* pCtx, ITexture* pCubemap, FaceHandlerTy
     }
 }
 
-static void ClearCubemap(IDeviceContext* pCtx, ITexture* pCubemap)
+static void ClearCubemap(IDeviceContext* pCtx, ITexture* pCubemap, const float* pClearColor)
 {
-    ProcessCubemapFaces(pCtx, pCubemap, [pCtx](ITextureView* pRTV, Uint32 mip, Uint32 face) {
-        pCtx->ClearRenderTarget(pRTV, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if (pCtx == nullptr || pCubemap == nullptr)
+    {
+        UNEXPECTED("Device context and cubemap must not be null");
+        return;
+    }
+
+    ProcessCubemapFaces(pCtx, pCubemap, [pCtx, pClearColor](ITextureView* pRTV, Uint32 mip, Uint32 face) {
+        pCtx->ClearRenderTarget(pRTV, pClearColor, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     });
+}
+
+Uint32 PBR_Renderer::SelectActiveMorphTargets(const Float32*     pWeights,
+                                              Uint32             WeightCount,
+                                              ActiveMorphTarget* pActiveTargets,
+                                              Uint32             MaxActiveTargetCount) noexcept
+{
+    if (WeightCount == 0 || MaxActiveTargetCount == 0)
+        return 0;
+
+    if (pWeights == nullptr || pActiveTargets == nullptr)
+    {
+        UNEXPECTED("Morph target weights and output palette must not be null");
+        return 0;
+    }
+
+    const auto HasHigherPriority = [](const ActiveMorphTarget& Lhs, const ActiveMorphTarget& Rhs) {
+        const Float32 LhsMagnitude = std::abs(Lhs.Weight);
+        const Float32 RhsMagnitude = std::abs(Rhs.Weight);
+        return LhsMagnitude > RhsMagnitude ||
+            (LhsMagnitude == RhsMagnitude && Lhs.TargetIndex < Rhs.TargetIndex);
+    };
+
+    Uint32 ActiveTargetCount = 0;
+    for (Uint32 TargetIndex = 0; TargetIndex < WeightCount; ++TargetIndex)
+    {
+        const Float32 Weight = pWeights[TargetIndex];
+        if (Weight == 0)
+            continue;
+
+        const ActiveMorphTarget Candidate{TargetIndex, Weight};
+        Uint32                  InsertPosition = ActiveTargetCount;
+        while (InsertPosition > 0 && HasHigherPriority(Candidate, pActiveTargets[InsertPosition - 1]))
+            --InsertPosition;
+
+        if (ActiveTargetCount < MaxActiveTargetCount)
+        {
+            for (Uint32 Index = ActiveTargetCount; Index > InsertPosition; --Index)
+                pActiveTargets[Index] = pActiveTargets[Index - 1];
+            pActiveTargets[InsertPosition] = Candidate;
+            ++ActiveTargetCount;
+        }
+        else if (InsertPosition < MaxActiveTargetCount)
+        {
+            for (Uint32 Index = MaxActiveTargetCount - 1; Index > InsertPosition; --Index)
+                pActiveTargets[Index] = pActiveTargets[Index - 1];
+            pActiveTargets[InsertPosition] = Candidate;
+        }
+    }
+
+    return ActiveTargetCount;
 }
 
 Uint32 PBR_Renderer::GetJointsDataSize(Uint32 MaxJointCount, bool UsePrevFrameTransforms)
@@ -315,6 +392,11 @@ const char* PBR_Renderer::GetJointTransformsVarName() const
         "g_JointTransforms";
 }
 
+const char* PBR_Renderer::GetMorphTargetDeltasVarName()
+{
+    return "g_MorphTargetDeltas";
+}
+
 PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
                            IRenderStateCache* pStateCache,
                            IDeviceContext*    pCtx,
@@ -323,55 +405,34 @@ PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
     m_InputLayout{CI.InputLayout},
     m_Settings{
         [this](CreateInfo CI) {
-            CI.InputLayout               = m_InputLayout;
-            CI.SheenAlbedoScalingLUTPath = nullptr;
+            CI.InputLayout = m_InputLayout;
             return CI;
         }(CI)},
     m_Device{pDevice, pStateCache},
     m_PBRPrimitiveAttribsCB{CI.pPrimitiveAttribsCB},
     m_PBRMaterialAttribsCB{CI.pMaterialAttribsCB},
-    m_JointsBuffer{CI.pJointsBuffer}
+    m_JointsBuffer{CI.pJointsBuffer},
+    m_MorphTargetBuffer{CI.pMorphTargetBuffer}
 {
+    const RenderDeviceInfo& DeviceInfo = m_Device.GetDeviceInfo();
+    if (m_Settings.MaxActiveMorphTargetCount > 0 &&
+        DeviceInfo.Type == RENDER_DEVICE_TYPE_GLES && DeviceInfo.APIVersion < Version{3, 1})
+    {
+        // OpenGL ES 3.0, including WebGL 2, has no shader storage buffers.
+        LOG_WARNING_MESSAGE("Morph targets are disabled because OpenGL ES 3.0 does not support shader storage buffers");
+        m_Settings.MaxActiveMorphTargetCount = 0;
+    }
+
     if (m_Settings.EnableIBL)
     {
-        PrecomputeBRDF(pCtx, m_Settings.NumBRDFSamples);
+        PrecomputeBRDF(pCtx, m_Settings.NumBRDFSamples, BRDFType::GGX);
+    }
 
-        TextureDesc TexDesc;
-        TexDesc.Type      = RESOURCE_DIM_TEX_CUBE;
-        TexDesc.Usage     = USAGE_DEFAULT;
-        TexDesc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
-        TexDesc.ArraySize = 6;
-
-        {
-            TexDesc.Name      = "Irradiance cube map for PBR renderer";
-            TexDesc.Width     = IrradianceCubeDim;
-            TexDesc.Height    = IrradianceCubeDim;
-            TexDesc.Format    = IrradianceCubeFmt;
-            TexDesc.MipLevels = 1;
-
-            RefCntAutoPtr<ITexture> IrradainceCubeTex = m_Device.CreateTexture(TexDesc);
-            VERIFY_EXPR(IrradainceCubeTex);
-            ClearCubemap(pCtx, IrradainceCubeTex);
-
-            m_pIrradianceCubeSRV = IrradainceCubeTex->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
-            VERIFY_EXPR(m_pIrradianceCubeSRV);
-        }
-
-
-        {
-            TexDesc.Name      = "Prefiltered environment map for PBR renderer";
-            TexDesc.Width     = PrefilteredEnvMapDim;
-            TexDesc.Height    = PrefilteredEnvMapDim;
-            TexDesc.Format    = PrefilteredEnvMapFmt;
-            TexDesc.MipLevels = 0;
-
-            RefCntAutoPtr<ITexture> PrefilteredEnvMapTex = m_Device.CreateTexture(TexDesc);
-            VERIFY_EXPR(PrefilteredEnvMapTex);
-            ClearCubemap(pCtx, PrefilteredEnvMapTex);
-
-            m_pPrefilteredEnvMapSRV = PrefilteredEnvMapTex->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
-            VERIFY_EXPR(m_pPrefilteredEnvMapSRV);
-        }
+    if (m_Settings.EnableSheen)
+    {
+        PrecomputeBRDF(pCtx, m_Settings.NumBRDFSamples, BRDFType::Sheen);
+        if (m_Settings.EnableIBL)
+            PrecomputeSheenSampling(pCtx);
     }
 
     if (m_Settings.CreateDefaultTextures)
@@ -427,57 +488,6 @@ PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
         m_pDefaultPhysDescSRV->SetSampler(pDefaultSampler);
     }
 
-    if (m_Settings.EnableSheen)
-    {
-        if (CI.SheenAlbedoScalingLUTPath != nullptr)
-        {
-            TextureLoadInfo LoadInfo{"Sheen Albedo Scaling"};
-            LoadInfo.Format = TEX_FORMAT_R8_UNORM;
-            RefCntAutoPtr<ITexture> SheenAlbedoScalingLUT;
-            CreateTextureFromFile(CI.SheenAlbedoScalingLUTPath, LoadInfo, m_Device, &SheenAlbedoScalingLUT);
-            if (SheenAlbedoScalingLUT)
-            {
-                m_pSheenAlbedoScaling_LUT_SRV = SheenAlbedoScalingLUT->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
-                StateTransitionDesc Barriers{SheenAlbedoScalingLUT, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE};
-                pCtx->TransitionResourceState(Barriers);
-            }
-            else
-            {
-                LOG_ERROR_MESSAGE("Failed to load sheen albedo scaling look-up table from file ", CI.SheenAlbedoScalingLUTPath);
-            }
-        }
-        else
-        {
-            UNEXPECTED("Sheen albedo scaling look-up table path is not specified");
-        }
-
-        if (m_Settings.EnableIBL)
-        {
-            if (CI.PreintegratedCharlieBRDFPath != nullptr)
-            {
-                TextureLoadInfo LoadInfo{"Preintegrated Charlie BRDF"};
-                LoadInfo.Format    = TEX_FORMAT_R8_UNORM;
-                LoadInfo.Swizzle.R = TEXTURE_COMPONENT_SWIZZLE_B;
-                RefCntAutoPtr<ITexture> PreintegratedCharlieBRDF;
-                CreateTextureFromFile(CI.PreintegratedCharlieBRDFPath, LoadInfo, m_Device, &PreintegratedCharlieBRDF);
-                if (PreintegratedCharlieBRDF)
-                {
-                    m_pPreintegratedCharlie_SRV = PreintegratedCharlieBRDF->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
-                    StateTransitionDesc Barriers{PreintegratedCharlieBRDF, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE};
-                    pCtx->TransitionResourceState(Barriers);
-                }
-                else
-                {
-                    LOG_ERROR_MESSAGE("Failed to load preintegrated Charlie BRDF look-up table from file ", CI.PreintegratedCharlieBRDFPath);
-                }
-            }
-            else
-            {
-                UNEXPECTED("Preintegrated Charlie BRDF look-up table path is not specified");
-            }
-        }
-    }
-
     {
         if (!m_PBRPrimitiveAttribsCB)
         {
@@ -497,7 +507,7 @@ PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
             }
 
             const Uint32 JointsBufferSize = GetJointsBufferSize();
-            if (!m_JointsBuffer)
+            if (!m_JointsBuffer && m_Settings.CreateDefaultJointsBuffer)
             {
                 BufferDesc JointsBuffDesc;
                 JointsBuffDesc.Name           = "PBR joint transforms";
@@ -517,11 +527,38 @@ PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
                 pDevice->CreateBuffer(JointsBuffDesc, nullptr, &m_JointsBuffer);
                 VERIFY_EXPR(m_JointsBuffer);
             }
-            else
+            else if (m_JointsBuffer)
             {
                 DEV_CHECK_ERR(m_JointsBuffer->GetDesc().Size >= JointsBufferSize, "PBR joint transforms buffer is too small to hold ", m_Settings.MaxJointCount, " joints.");
             }
         }
+
+        if (m_Settings.MaxActiveMorphTargetCount > 0)
+        {
+            if (!m_MorphTargetBuffer && m_Settings.CreateDefaultMorphTargetBuffer)
+            {
+                BufferDesc MorphTargetBufferDesc;
+                MorphTargetBufferDesc.Name              = "PBR morph target deltas";
+                MorphTargetBufferDesc.Size              = sizeof(Float32);
+                MorphTargetBufferDesc.Usage             = USAGE_DEFAULT;
+                MorphTargetBufferDesc.BindFlags         = BIND_SHADER_RESOURCE;
+                MorphTargetBufferDesc.Mode              = BUFFER_MODE_STRUCTURED;
+                MorphTargetBufferDesc.ElementByteStride = sizeof(Float32);
+                pDevice->CreateBuffer(MorphTargetBufferDesc, nullptr, &m_MorphTargetBuffer);
+                VERIFY_EXPR(m_MorphTargetBuffer);
+            }
+            else if (m_MorphTargetBuffer)
+            {
+                const BufferDesc& MorphTargetBufferDesc = m_MorphTargetBuffer->GetDesc();
+                DEV_CHECK_ERR((MorphTargetBufferDesc.BindFlags & BIND_SHADER_RESOURCE) != 0,
+                              "PBR morph target buffer must have BIND_SHADER_RESOURCE flag.");
+                DEV_CHECK_ERR(MorphTargetBufferDesc.Mode == BUFFER_MODE_STRUCTURED,
+                              "PBR morph target buffer must use BUFFER_MODE_STRUCTURED mode.");
+                DEV_CHECK_ERR(MorphTargetBufferDesc.ElementByteStride == sizeof(Float32),
+                              "PBR morph target buffer element stride must be sizeof(Float32).");
+            }
+        }
+
         std::vector<StateTransitionDesc> Barriers;
         Barriers.emplace_back(m_PBRPrimitiveAttribsCB, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_CONSTANT_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE);
         Barriers.emplace_back(m_PBRMaterialAttribsCB, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_CONSTANT_BUFFER, STATE_TRANSITION_FLAG_UPDATE_STATE);
@@ -532,6 +569,8 @@ PBR_Renderer::PBR_Renderer(IRenderDevice*     pDevice,
                 RESOURCE_STATE_SHADER_RESOURCE;
             Barriers.emplace_back(m_JointsBuffer, RESOURCE_STATE_UNKNOWN, JointsBufferState, STATE_TRANSITION_FLAG_UPDATE_STATE);
         }
+        if (m_MorphTargetBuffer)
+            Barriers.emplace_back(m_MorphTargetBuffer, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE);
         pCtx->TransitionResourceStates(static_cast<Uint32>(Barriers.size()), Barriers.data());
     }
 
@@ -571,82 +610,78 @@ PBR_Renderer::~PBR_Renderer()
 }
 
 void PBR_Renderer::PrecomputeBRDF(IDeviceContext* pCtx,
-                                  Uint32          NumBRDFSamples)
+                                  Uint32          NumBRDFSamples,
+                                  BRDFType        Type)
 {
+    VERIFY_EXPR(Type == BRDFType::GGX || Type == BRDFType::Sheen);
+    const bool IsGGX = Type == BRDFType::GGX;
+
     TextureDesc TexDesc;
-    TexDesc.Name      = "Preintegrated GGX";
+    TexDesc.Name      = IsGGX ? "Preintegrated GGX" : "Preintegrated Sheen";
     TexDesc.Type      = RESOURCE_DIM_TEX_2D;
     TexDesc.Usage     = USAGE_DEFAULT;
     TexDesc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
     TexDesc.Width     = BRDF_LUT_Dim;
     TexDesc.Height    = BRDF_LUT_Dim;
-    TexDesc.Format    = TEX_FORMAT_RG16_FLOAT;
+    TexDesc.Format    = IsGGX ? TEX_FORMAT_RG16_FLOAT : TEX_FORMAT_R16_FLOAT;
     TexDesc.MipLevels = 1;
 
-    RefCntAutoPtr<ITexture> pPreintegratedGGX = m_Device.CreateTexture(TexDesc);
-    m_pPreintegratedGGX_SRV                   = pPreintegratedGGX->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    RefCntAutoPtr<ITexture>      pPreintegratedBRDF = m_Device.CreateTexture(TexDesc);
+    RefCntAutoPtr<ITextureView>& pPreintegratedBRDF_SRV =
+        IsGGX ? m_pPreintegratedGGX_SRV : m_pPreintegratedSheen_SRV;
+    pPreintegratedBRDF_SRV = pPreintegratedBRDF->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
 
-    RefCntAutoPtr<IPipelineState> PrecomputeBRDF_PSO;
+    GraphicsPipelineStateCreateInfo PSOCreateInfo;
+    PipelineStateDesc&              PSODesc          = PSOCreateInfo.PSODesc;
+    GraphicsPipelineDesc&           GraphicsPipeline = PSOCreateInfo.GraphicsPipeline;
+
+    PSODesc.Name         = IsGGX ? "Precompute BRDF LUT PSO" : "Precompute sheen BRDF LUT PSO";
+    PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
+
+    GraphicsPipeline.NumRenderTargets             = 1;
+    GraphicsPipeline.RTVFormats[0]                = TexDesc.Format;
+    GraphicsPipeline.PrimitiveTopology            = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
+    GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
+
+    ShaderCreateInfo ShaderCI;
+    ShaderCI.SourceLanguage             = SHADER_SOURCE_LANGUAGE_HLSL;
+    ShaderCI.pShaderSourceStreamFactory = &DiligentFXShaderSourceStreamFactory::GetInstance();
+
+    ShaderMacroHelper Macros;
+    Macros.AddShaderMacro("NUM_SAMPLES", NumBRDFSamples);
+    ShaderCI.Macros = Macros;
+
+    RefCntAutoPtr<IShader> pVS;
     {
-        GraphicsPipelineStateCreateInfo PSOCreateInfo;
-        PipelineStateDesc&              PSODesc          = PSOCreateInfo.PSODesc;
-        GraphicsPipelineDesc&           GraphicsPipeline = PSOCreateInfo.GraphicsPipeline;
+        ShaderCI.Desc       = {"Full screen triangle VS", SHADER_TYPE_VERTEX, true};
+        ShaderCI.EntryPoint = "FullScreenTriangleVS";
+        ShaderCI.FilePath   = "FullScreenTriangleVS.fx";
 
-        PSODesc.Name         = "Precompute BRDF LUT PSO";
-        PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
-
-        GraphicsPipeline.NumRenderTargets             = 1;
-        GraphicsPipeline.RTVFormats[0]                = TexDesc.Format;
-        GraphicsPipeline.PrimitiveTopology            = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
-        GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
-
-        ShaderCreateInfo ShaderCI;
-        ShaderCI.SourceLanguage             = SHADER_SOURCE_LANGUAGE_HLSL;
-        ShaderCI.pShaderSourceStreamFactory = &DiligentFXShaderSourceStreamFactory::GetInstance();
-
-        ShaderMacroHelper Macros;
-        Macros.AddShaderMacro("NUM_SAMPLES", NumBRDFSamples);
-        ShaderCI.Macros = Macros;
-
-        RefCntAutoPtr<IShader> pVS;
-        {
-            ShaderCI.Desc       = {"Full screen triangle VS", SHADER_TYPE_VERTEX, true};
-            ShaderCI.EntryPoint = "FullScreenTriangleVS";
-            ShaderCI.FilePath   = "FullScreenTriangleVS.fx";
-
-            pVS = m_Device.CreateShader(ShaderCI);
-        }
-
-        // Create pixel shader
-        RefCntAutoPtr<IShader> pPS;
-        {
-            ShaderCI.Desc       = {"Precompute BRDF PS", SHADER_TYPE_PIXEL, true};
-            ShaderCI.EntryPoint = "PrecomputeBRDF_PS";
-            ShaderCI.FilePath   = "PrecomputeBRDF.psh";
-
-            pPS = m_Device.CreateShader(ShaderCI);
-        }
-
-        // Finally, create the pipeline state
-        PSOCreateInfo.pVS  = pVS;
-        PSOCreateInfo.pPS  = pPS;
-        PrecomputeBRDF_PSO = m_Device.CreateGraphicsPipelineState(PSOCreateInfo);
+        pVS = m_Device.CreateShader(ShaderCI);
     }
-    pCtx->SetPipelineState(PrecomputeBRDF_PSO);
 
-    ITextureView* pRTVs[] = {pPreintegratedGGX->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET)};
-    pCtx->SetRenderTargets(1, pRTVs, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    DrawAttribs attrs(3, DRAW_FLAG_VERIFY_ALL);
-    pCtx->Draw(attrs);
-
-    // clang-format off
-    StateTransitionDesc Barriers[] =
+    RefCntAutoPtr<IShader> pPS;
     {
-        {pPreintegratedGGX, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE}
-    };
-    // clang-format on
-    pCtx->TransitionResourceStates(_countof(Barriers), Barriers);
+        ShaderCI.Desc       = {IsGGX ? "Precompute BRDF PS" : "Precompute sheen BRDF PS", SHADER_TYPE_PIXEL, true};
+        ShaderCI.EntryPoint = IsGGX ? "PrecomputeBRDF_PS" : "PrecomputeSheenBRDF_PS";
+        ShaderCI.FilePath   = IsGGX ? "PrecomputeBRDF.psh" : "PrecomputeSheenBRDF.psh";
+
+        pPS = m_Device.CreateShader(ShaderCI);
+    }
+
+    PSOCreateInfo.pVS = pVS;
+    PSOCreateInfo.pPS = pPS;
+
+    RefCntAutoPtr<IPipelineState> pPrecomputeBRDFPSO = m_Device.CreateGraphicsPipelineState(PSOCreateInfo);
+    pCtx->SetPipelineState(pPrecomputeBRDFPSO);
+
+    ITextureView* pRTVs[] = {pPreintegratedBRDF->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET)};
+    pCtx->SetRenderTargets(1, pRTVs, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    pCtx->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
+
+    StateTransitionDesc Barrier{pPreintegratedBRDF, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE};
+    pCtx->TransitionResourceState(Barrier);
 }
 
 static Uint32 GetDefaultDiffuseSamplesCount(const GraphicsAdapterInfo& AdapterInfo)
@@ -691,11 +726,70 @@ static Uint32 GetDefaultDiffuseSamplesCount(const GraphicsAdapterInfo& AdapterIn
 #endif
 }
 
-void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
-                                      ITextureView*   pEnvMapSRV,
-                                      Uint32          NumDiffuseSamples,
-                                      Uint32          NumSpecularSamples,
-                                      bool            OptimizeSamples)
+TextureDesc PBR_Renderer::GetIrradianceCubeDesc(const char*    Name,
+                                                TEXTURE_FORMAT Format,
+                                                Uint32         Dimension)
+{
+    TextureDesc TexDesc;
+    TexDesc.Name      = Name;
+    TexDesc.Type      = RESOURCE_DIM_TEX_CUBE;
+    TexDesc.Usage     = USAGE_DEFAULT;
+    TexDesc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    TexDesc.Format    = Format;
+    TexDesc.Width     = Dimension;
+    TexDesc.Height    = Dimension;
+    TexDesc.MipLevels = 1;
+    TexDesc.ArraySize = 6;
+    return TexDesc;
+}
+
+TextureDesc PBR_Renderer::GetPrefilteredEnvMapDesc(const char*    Name,
+                                                   TEXTURE_FORMAT Format,
+                                                   Uint32         Dimension)
+{
+    TextureDesc TexDesc;
+    TexDesc.Name      = Name;
+    TexDesc.Type      = RESOURCE_DIM_TEX_CUBE;
+    TexDesc.Usage     = USAGE_DEFAULT;
+    TexDesc.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+    TexDesc.Format    = Format;
+    TexDesc.Width     = Dimension;
+    TexDesc.Height    = Dimension;
+    TexDesc.MipLevels = 0;
+    TexDesc.ArraySize = 6;
+    return TexDesc;
+}
+
+RefCntAutoPtr<ITexture> PBR_Renderer::CreateIrradianceCube(IDeviceContext* pCtx,
+                                                           const char*     Name,
+                                                           TEXTURE_FORMAT  Format,
+                                                           Uint32          Dimension,
+                                                           const float*    pClearColor) const
+{
+    RefCntAutoPtr<ITexture> pIrradianceCube = m_Device.CreateTexture(GetIrradianceCubeDesc(Name, Format, Dimension), nullptr);
+    VERIFY_EXPR(pIrradianceCube);
+    if (pIrradianceCube != nullptr && pCtx != nullptr)
+        ClearCubemap(pCtx, pIrradianceCube, pClearColor);
+
+    return pIrradianceCube;
+}
+
+RefCntAutoPtr<ITexture> PBR_Renderer::CreatePrefilteredEnvMap(IDeviceContext* pCtx,
+                                                              const char*     Name,
+                                                              TEXTURE_FORMAT  Format,
+                                                              Uint32          Dimension,
+                                                              const float*    pClearColor) const
+{
+    RefCntAutoPtr<ITexture> pPrefilteredEnvMap = m_Device.CreateTexture(GetPrefilteredEnvMapDesc(Name, Format, Dimension), nullptr);
+    VERIFY_EXPR(pPrefilteredEnvMap);
+    if (pPrefilteredEnvMap != nullptr && pCtx != nullptr)
+        ClearCubemap(pCtx, pPrefilteredEnvMap, pClearColor);
+
+    return pPrefilteredEnvMap;
+}
+
+void PBR_Renderer::PrecomputeCubemaps(IDeviceContext*                  pCtx,
+                                      const PrecomputeCubemapsAttribs& Attribs)
 {
     if (!m_Settings.EnableIBL)
     {
@@ -703,6 +797,29 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
         return;
     }
 
+    if (pCtx == nullptr ||
+        Attribs.pEnvironmentMapSRV == nullptr ||
+        Attribs.pIrradianceCube == nullptr ||
+        Attribs.pPrefilteredEnvMap == nullptr)
+    {
+        UNEXPECTED("Device context, environment map SRV, and output cubemaps must not be null");
+        return;
+    }
+
+    if (Attribs.pPrefilteredSheenEnvMap == Attribs.pPrefilteredEnvMap)
+    {
+        UNEXPECTED("GGX and Charlie prefiltering require distinct output cubemaps");
+        return;
+    }
+
+    if (Attribs.pPrefilteredSheenEnvMap != nullptr && !m_Settings.EnableSheen)
+    {
+        LOG_ERROR_MESSAGE("Sheen environment map precomputation requires CreateInfo::EnableSheen to be true");
+        return;
+    }
+
+    Uint32 NumDiffuseSamples  = Attribs.NumDiffuseSamples;
+    Uint32 NumSpecularSamples = Attribs.NumSpecularSamples;
     if (NumSpecularSamples == 0)
     {
         NumSpecularSamples = 256;
@@ -715,45 +832,72 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
     struct PrecomputeEnvMapAttribs
     {
         float4x4 Rotation;
+        float4   EnvMapUVScaleBias;
 
         float Roughness;
         float EnvMapWidth;
         float EnvMapHeight;
         float EnvMapMipCount;
 
-        uint NumSamples;
-        uint Padding0 = 0;
-        uint Padding1 = 0;
-        uint Padding2 = 0;
+        float EnvMapSlice;
+        uint  NumSamples;
+        int   SphereMapRow0IsNegativeY;
+        uint  Padding1 = 0;
 
-        PrecomputeEnvMapAttribs(const TextureDesc& EnvMapDesc, const float4x4& _Rotation, uint _NumSamples) :
+        PrecomputeEnvMapAttribs(const TextureDesc&               EnvMapDesc,
+                                const PrecomputeCubemapsAttribs& Attribs,
+                                const float4x4&                  _Rotation,
+                                uint                             _NumSamples) :
             Rotation{_Rotation},
+            EnvMapUVScaleBias{Attribs.EnvironmentMapUVScaleBias},
             Roughness{0.0f},
-            EnvMapWidth{static_cast<float>(EnvMapDesc.Width)},
-            EnvMapHeight{static_cast<float>(EnvMapDesc.Height)},
-            EnvMapMipCount{static_cast<float>(EnvMapDesc.MipLevels)},
-            NumSamples{_NumSamples}
+            EnvMapWidth{static_cast<float>(Attribs.EnvironmentMapWidth != 0 ? Attribs.EnvironmentMapWidth : EnvMapDesc.Width)},
+            EnvMapHeight{static_cast<float>(Attribs.EnvironmentMapHeight != 0 ? Attribs.EnvironmentMapHeight : EnvMapDesc.Height)},
+            EnvMapMipCount{static_cast<float>(Attribs.EnvironmentMapMipLevels != 0 ? Attribs.EnvironmentMapMipLevels : EnvMapDesc.MipLevels)},
+            EnvMapSlice{Attribs.EnvironmentMapSlice},
+            NumSamples{_NumSamples},
+            SphereMapRow0IsNegativeY{static_cast<int>(Attribs.SphereMapRow0IsNegativeY)}
         {}
     };
 
     IBL_FEATURE_FLAGS FeatureFlags = IBL_FEATURE_FLAG_NONE;
 
-    if (OptimizeSamples)
+    if (Attribs.OptimizeSamples)
         FeatureFlags |= IBL_FEATURE_FLAG_OPTIMIZE_SAMPLES;
 
-    const TextureDesc&             EnvMapDesc = pEnvMapSRV->GetTexture()->GetDesc();
-    const IBL_PSOKey::ENV_MAP_TYPE EnvMapType = EnvMapDesc.IsCube() ?
-        IBL_PSOKey::ENV_MAP_TYPE_CUBE :
-        IBL_PSOKey::ENV_MAP_TYPE_SPHERE;
+    const TextureDesc& EnvMapDesc = Attribs.pEnvironmentMapSRV->GetTexture()->GetDesc();
+
+    IBL_PSOKey::ENV_MAP_TYPE EnvMapType = IBL_PSOKey::ENV_MAP_TYPE_NUM_TYPES;
+    switch (Attribs.pEnvironmentMapSRV->GetDesc().TextureDim)
+    {
+        case RESOURCE_DIM_TEX_CUBE:
+            EnvMapType = IBL_PSOKey::ENV_MAP_TYPE_CUBE;
+            break;
+
+        case RESOURCE_DIM_TEX_2D:
+            EnvMapType = IBL_PSOKey::ENV_MAP_TYPE_SPHERE;
+            break;
+
+        case RESOURCE_DIM_TEX_2D_ARRAY:
+            EnvMapType = IBL_PSOKey::ENV_MAP_TYPE_SPHERE_ARRAY;
+            break;
+
+        default:
+            UNEXPECTED("Environment map SRV must be a cube, 2D, or 2D array texture view");
+            return;
+    }
+
+    const TextureDesc& IrradianceCubeDesc = Attribs.pIrradianceCube->GetDesc();
 
     ShaderMacroHelper Macros;
     Macros
         .Add("OPTIMIZE_SAMPLES", (FeatureFlags & IBL_FEATURE_FLAG_OPTIMIZE_SAMPLES) != 0)
         .Add("ENV_MAP_TYPE_CUBE", static_cast<int>(IBL_PSOKey::ENV_MAP_TYPE_CUBE))
         .Add("ENV_MAP_TYPE_SPHERE", static_cast<int>(IBL_PSOKey::ENV_MAP_TYPE_SPHERE))
+        .Add("ENV_MAP_TYPE_SPHERE_ARRAY", static_cast<int>(IBL_PSOKey::ENV_MAP_TYPE_SPHERE_ARRAY))
         .Add("ENV_MAP_TYPE", static_cast<int>(EnvMapType));
 
-    IBL_RenderTechnique& PrecomputeIrradianceCubeTech = m_IBL_PSOCache[IBL_PSOKey{IBL_PSOKey::PSO_TYPE_IRRADIANCE_CUBE, EnvMapType, FeatureFlags, m_pIrradianceCubeSRV->GetDesc().Format}];
+    IBL_RenderTechnique& PrecomputeIrradianceCubeTech = m_IBL_PSOCache[IBL_PSOKey{IBL_PSOKey::PSO_TYPE_IRRADIANCE_CUBE, EnvMapType, FeatureFlags, IrradianceCubeDesc.Format}];
     if (!PrecomputeIrradianceCubeTech.IsInitialized())
     {
         ShaderCreateInfo ShaderCI;
@@ -790,7 +934,7 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
         PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
 
         GraphicsPipeline.NumRenderTargets             = 1;
-        GraphicsPipeline.RTVFormats[0]                = m_pIrradianceCubeSRV->GetDesc().Format;
+        GraphicsPipeline.RTVFormats[0]                = IrradianceCubeDesc.Format;
         GraphicsPipeline.PrimitiveTopology            = PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
         GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
         GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
@@ -809,60 +953,72 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
         PrecomputeIrradianceCubeTech.PSO->CreateShaderResourceBinding(&PrecomputeIrradianceCubeTech.SRB, true);
     }
 
-    IBL_RenderTechnique& PrefilterEnvMapTech = m_IBL_PSOCache[IBL_PSOKey{IBL_PSOKey::PSO_TYPE_PREFILTERED_ENV_MAP, EnvMapType, FeatureFlags, m_pPrefilteredEnvMapSRV->GetDesc().Format}];
-    if (!PrefilterEnvMapTech.IsInitialized())
-    {
-        ShaderCreateInfo ShaderCI;
-        ShaderCI.SourceLanguage             = SHADER_SOURCE_LANGUAGE_HLSL;
-        ShaderCI.pShaderSourceStreamFactory = &DiligentFXShaderSourceStreamFactory::GetInstance();
-        ShaderCI.Macros                     = Macros;
-        ShaderCI.CompileFlags               = SHADER_COMPILE_FLAG_PACK_MATRIX_ROW_MAJOR;
+    const auto GetPrefilterEnvMapTech = [&](IBL_PSOKey::PSO_TYPE PSOType, TEXTURE_FORMAT RTVFormat) -> IBL_RenderTechnique& {
+        VERIFY_EXPR(PSOType == IBL_PSOKey::PSO_TYPE_PREFILTERED_GGX_ENV_MAP ||
+                    PSOType == IBL_PSOKey::PSO_TYPE_PREFILTERED_CHARLIE_ENV_MAP);
+        const bool IsCharlie = PSOType == IBL_PSOKey::PSO_TYPE_PREFILTERED_CHARLIE_ENV_MAP;
 
-        RefCntAutoPtr<IShader> pVS;
+        IBL_RenderTechnique& Tech = m_IBL_PSOCache[IBL_PSOKey{PSOType, EnvMapType, FeatureFlags, RTVFormat}];
+        if (!Tech.IsInitialized())
         {
-            ShaderCI.Desc       = {"Cubemap face VS", SHADER_TYPE_VERTEX, true};
-            ShaderCI.EntryPoint = "main";
-            ShaderCI.FilePath   = "CubemapFace.vsh";
+            ShaderCreateInfo ShaderCI;
+            ShaderCI.SourceLanguage             = SHADER_SOURCE_LANGUAGE_HLSL;
+            ShaderCI.pShaderSourceStreamFactory = &DiligentFXShaderSourceStreamFactory::GetInstance();
+            ShaderMacroHelper PrefilterMacros   = Macros;
+            PrefilterMacros.Add("PREFILTER_ENV_MAP_CHARLIE", IsCharlie);
+            ShaderCI.Macros       = PrefilterMacros;
+            ShaderCI.CompileFlags = SHADER_COMPILE_FLAG_PACK_MATRIX_ROW_MAJOR;
 
-            pVS = m_Device.CreateShader(ShaderCI);
+            RefCntAutoPtr<IShader> pVS;
+            {
+                ShaderCI.Desc       = {"Cubemap face VS", SHADER_TYPE_VERTEX, true};
+                ShaderCI.EntryPoint = "main";
+                ShaderCI.FilePath   = "CubemapFace.vsh";
+
+                pVS = m_Device.CreateShader(ShaderCI);
+            }
+
+            RefCntAutoPtr<IShader> pPS;
+            {
+                ShaderCI.Desc       = {IsCharlie ? "Prefilter sheen environment map PS" : "Prefilter environment map PS", SHADER_TYPE_PIXEL, true};
+                ShaderCI.EntryPoint = "main";
+                ShaderCI.FilePath   = "PrefilterEnvMap.psh";
+
+                pPS = m_Device.CreateShader(ShaderCI);
+            }
+
+            GraphicsPipelineStateCreateInfo PSOCreateInfo;
+            PipelineStateDesc&              PSODesc          = PSOCreateInfo.PSODesc;
+            GraphicsPipelineDesc&           GraphicsPipeline = PSOCreateInfo.GraphicsPipeline;
+
+            PSODesc.Name         = IsCharlie ? "Prefilter sheen environment map PSO" : "Prefilter environment map PSO";
+            PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
+
+            GraphicsPipeline.NumRenderTargets             = 1;
+            GraphicsPipeline.RTVFormats[0]                = RTVFormat;
+            GraphicsPipeline.PrimitiveTopology            = PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+            GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
+            GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
+
+            PSOCreateInfo.pVS = pVS;
+            PSOCreateInfo.pPS = pPS;
+
+            PipelineResourceLayoutDescX ResourceLayout;
+            ResourceLayout
+                .AddVariable(SHADER_TYPE_VS_PS, "cbConstants", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, SHADER_VARIABLE_FLAG_INLINE_CONSTANTS)
+                .AddVariable(SHADER_TYPE_PIXEL, "g_EnvironmentMap", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC)
+                .AddImmutableSampler(SHADER_TYPE_PIXEL, "g_EnvironmentMap", Sam_LinearClamp);
+            if (IsCharlie)
+                ResourceLayout.AddVariable(SHADER_TYPE_PIXEL, "g_SheenSampling", SHADER_RESOURCE_VARIABLE_TYPE_STATIC);
+            PSODesc.ResourceLayout = ResourceLayout;
+
+            Tech.PSO = m_Device.CreateGraphicsPipelineState(PSOCreateInfo);
+            if (IsCharlie)
+                ShaderResourceVariableX{Tech.PSO, SHADER_TYPE_PIXEL, "g_SheenSampling"}.Set(m_pSheenSampling_SRV);
+            Tech.PSO->CreateShaderResourceBinding(&Tech.SRB, true);
         }
-
-        // Create pixel shader
-        RefCntAutoPtr<IShader> pPS;
-        {
-            ShaderCI.Desc       = {"Prefilter environment map PS", SHADER_TYPE_PIXEL, true};
-            ShaderCI.EntryPoint = "main";
-            ShaderCI.FilePath   = "PrefilterEnvMap.psh";
-
-            pPS = m_Device.CreateShader(ShaderCI);
-        }
-
-        GraphicsPipelineStateCreateInfo PSOCreateInfo;
-        PipelineStateDesc&              PSODesc          = PSOCreateInfo.PSODesc;
-        GraphicsPipelineDesc&           GraphicsPipeline = PSOCreateInfo.GraphicsPipeline;
-
-        PSODesc.Name         = "Prefilter environment map PSO";
-        PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
-
-        GraphicsPipeline.NumRenderTargets             = 1;
-        GraphicsPipeline.RTVFormats[0]                = m_pPrefilteredEnvMapSRV->GetDesc().Format;
-        GraphicsPipeline.PrimitiveTopology            = PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
-        GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
-        GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
-
-        PSOCreateInfo.pVS = pVS;
-        PSOCreateInfo.pPS = pPS;
-
-        PipelineResourceLayoutDescX ResourceLayout;
-        ResourceLayout
-            .AddVariable(SHADER_TYPE_VS_PS, "cbConstants", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, SHADER_VARIABLE_FLAG_INLINE_CONSTANTS)
-            .AddVariable(SHADER_TYPE_PIXEL, "g_EnvironmentMap", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC)
-            .AddImmutableSampler(SHADER_TYPE_PIXEL, "g_EnvironmentMap", Sam_LinearClamp);
-        PSODesc.ResourceLayout = ResourceLayout;
-
-        PrefilterEnvMapTech.PSO = m_Device.CreateGraphicsPipelineState(PSOCreateInfo);
-        PrefilterEnvMapTech.PSO->CreateShaderResourceBinding(&PrefilterEnvMapTech.SRB, true);
-    }
+        return Tech;
+    };
 
     // clang-format off
     const std::array<float4x4, 6> Matrices =
@@ -877,15 +1033,14 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
     // clang-format on
 
     pCtx->SetPipelineState(PrecomputeIrradianceCubeTech.PSO);
-    ShaderResourceVariableX{PrecomputeIrradianceCubeTech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(pEnvMapSRV);
+    ShaderResourceVariableX{PrecomputeIrradianceCubeTech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(Attribs.pEnvironmentMapSRV);
     pCtx->CommitShaderResources(PrecomputeIrradianceCubeTech.SRB, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    ITexture*               pIrradianceCube = m_pIrradianceCubeSRV->GetTexture();
     ShaderResourceVariableX cbConstantsVar{PrecomputeIrradianceCubeTech.SRB, SHADER_TYPE_VERTEX, "cbConstants"};
     VERIFY_EXPR(cbConstantsVar);
-    ProcessCubemapFaces(pCtx, pIrradianceCube, [&](ITextureView* pRTV, Uint32 mip, Uint32 face) {
+    ProcessCubemapFaces(pCtx, Attribs.pIrradianceCube, [&](ITextureView* pRTV, Uint32 mip, Uint32 face) {
         VERIFY_EXPR(mip == 0);
-        PrecomputeEnvMapAttribs Attribs{EnvMapDesc, Matrices[face], NumDiffuseSamples};
-        cbConstantsVar.SetInlineConstants(&Attribs, 0, (sizeof(Attribs)) / sizeof(Uint32));
+        PrecomputeEnvMapAttribs EnvMapAttribs{EnvMapDesc, Attribs, Matrices[face], NumDiffuseSamples};
+        cbConstantsVar.SetInlineConstants(&EnvMapAttribs, 0, (sizeof(EnvMapAttribs)) / sizeof(Uint32));
 
         DrawAttribs drawAttrs{4, DRAW_FLAG_VERIFY_ALL};
         pCtx->Draw(drawAttrs);
@@ -894,43 +1049,52 @@ void PBR_Renderer::PrecomputeCubemaps(IDeviceContext* pCtx,
     ShaderResourceVariableX{PrecomputeIrradianceCubeTech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(nullptr);
 
 
-    pCtx->SetPipelineState(PrefilterEnvMapTech.PSO);
-    ShaderResourceVariableX{PrefilterEnvMapTech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(pEnvMapSRV);
-    pCtx->CommitShaderResources(PrefilterEnvMapTech.SRB, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    ITexture*    pPrefilteredEnvMap         = m_pPrefilteredEnvMapSRV->GetTexture();
-    const Uint32 PrefilteredEnvMapMipLevels = pPrefilteredEnvMap->GetDesc().MipLevels;
+    const auto PrecomputePrefilteredEnvMap = [&](ITexture* pPrefilteredEnvMap, IBL_PSOKey::PSO_TYPE PSOType) {
+        const TextureDesc&   PrefilteredEnvMapDesc = pPrefilteredEnvMap->GetDesc();
+        IBL_RenderTechnique& Tech                  = GetPrefilterEnvMapTech(PSOType, PrefilteredEnvMapDesc.Format);
 
-    cbConstantsVar = ShaderResourceVariableX{PrefilterEnvMapTech.SRB, SHADER_TYPE_VERTEX, "cbConstants"};
-    VERIFY_EXPR(cbConstantsVar);
-    ProcessCubemapFaces(pCtx, pPrefilteredEnvMap, [&](ITextureView* pRTV, Uint32 mip, Uint32 face) {
-        PrecomputeEnvMapAttribs Attribs{EnvMapDesc, Matrices[face], NumSpecularSamples};
-        Attribs.Roughness = static_cast<float>(mip) / static_cast<float>(PrefilteredEnvMapMipLevels - 1);
-        cbConstantsVar.SetInlineConstants(&Attribs, 0, (sizeof(Attribs)) / sizeof(Uint32));
+        pCtx->SetPipelineState(Tech.PSO);
+        ShaderResourceVariableX{Tech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(Attribs.pEnvironmentMapSRV);
+        pCtx->CommitShaderResources(Tech.SRB, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
-        DrawAttribs drawAttrs{4, DRAW_FLAG_VERIFY_ALL};
-        pCtx->Draw(drawAttrs);
-    });
+        cbConstantsVar = ShaderResourceVariableX{Tech.SRB, SHADER_TYPE_VERTEX, "cbConstants"};
+        VERIFY_EXPR(cbConstantsVar);
+        ProcessCubemapFaces(pCtx, pPrefilteredEnvMap, [&](ITextureView* pRTV, Uint32 mip, Uint32 face) {
+            PrecomputeEnvMapAttribs EnvMapAttribs{EnvMapDesc, Attribs, Matrices[face], NumSpecularSamples};
+            EnvMapAttribs.Roughness = static_cast<float>(mip) / static_cast<float>(PrefilteredEnvMapDesc.MipLevels - 1);
+            cbConstantsVar.SetInlineConstants(&EnvMapAttribs, 0, (sizeof(EnvMapAttribs)) / sizeof(Uint32));
 
-    // Release reference to the environment map
-    ShaderResourceVariableX{PrefilterEnvMapTech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(nullptr);
+            pCtx->Draw(DrawAttribs{4, DRAW_FLAG_VERIFY_ALL});
+        });
+
+        // Release the reference retained by the dynamic shader variable.
+        ShaderResourceVariableX{Tech.SRB, SHADER_TYPE_PIXEL, "g_EnvironmentMap"}.Set(nullptr);
+    };
+
+    PrecomputePrefilteredEnvMap(Attribs.pPrefilteredEnvMap, IBL_PSOKey::PSO_TYPE_PREFILTERED_GGX_ENV_MAP);
+    if (Attribs.pPrefilteredSheenEnvMap != nullptr)
+        PrecomputePrefilteredEnvMap(Attribs.pPrefilteredSheenEnvMap, IBL_PSOKey::PSO_TYPE_PREFILTERED_CHARLIE_ENV_MAP);
 
 
     // clang-format off
     StateTransitionDesc Barriers[] = 
     {
-        {m_pPrefilteredEnvMapSRV->GetTexture(), RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE},
-        {m_pIrradianceCubeSRV->GetTexture(),    RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE}
+        {Attribs.pPrefilteredEnvMap, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE},
+        {Attribs.pIrradianceCube,    RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE}
     };
     // clang-format on
     pCtx->TransitionResourceStates(_countof(Barriers), Barriers);
+
+    if (Attribs.pPrefilteredSheenEnvMap != nullptr)
+    {
+        StateTransitionDesc Barrier{Attribs.pPrefilteredSheenEnvMap, RESOURCE_STATE_UNKNOWN, RESOURCE_STATE_SHADER_RESOURCE, STATE_TRANSITION_FLAG_UPDATE_STATE};
+        pCtx->TransitionResourceState(Barrier);
+    }
 }
 
 
-void PBR_Renderer::InitCommonSRBVars(IShaderResourceBinding* pSRB,
-                                     IBuffer*                pFrameAttribs,
-                                     bool                    BindPrimitiveAttribsBuffer,
-                                     bool                    BindMaterialAttribsBuffer,
-                                     ITextureView*           pShadowMap) const
+void PBR_Renderer::InitCommonSRBVars(IShaderResourceBinding*         pSRB,
+                                     const InitCommonSRBVarsAttribs& Attribs) const
 {
     if (pSRB == nullptr)
     {
@@ -938,7 +1102,7 @@ void PBR_Renderer::InitCommonSRBVars(IShaderResourceBinding* pSRB,
         return;
     }
 
-    if (BindPrimitiveAttribsBuffer)
+    if (Attribs.BindPrimitiveAttribsBuffer)
     {
         if (ShaderResourceVariableX Var{pSRB, SHADER_TYPE_PIXEL, "cbPrimitiveAttribs"})
         {
@@ -947,7 +1111,7 @@ void PBR_Renderer::InitCommonSRBVars(IShaderResourceBinding* pSRB,
         }
     }
 
-    if (BindMaterialAttribsBuffer)
+    if (Attribs.BindMaterialAttribsBuffer)
     {
         if (ShaderResourceVariableX Var{pSRB, SHADER_TYPE_PIXEL, "cbMaterialAttribs"})
         {
@@ -962,37 +1126,87 @@ void PBR_Renderer::InitCommonSRBVars(IShaderResourceBinding* pSRB,
         {
             if (Var.Get() == nullptr)
             {
-                if (m_Settings.JointsBufferMode == JOINTS_BUFFER_MODE_UNIFORM)
+                IBuffer* const pJointsBuffer = Attribs.pJointsBuffer != nullptr ?
+                    Attribs.pJointsBuffer :
+                    m_JointsBuffer.RawPtr();
+
+                if (pJointsBuffer != nullptr)
                 {
-                    const Uint32 JointsBufferSize = GetJointsBufferSize();
-                    Var.SetBufferRange(m_JointsBuffer, 0, JointsBufferSize);
-                }
-                else if (m_Settings.JointsBufferMode == JOINTS_BUFFER_MODE_STRUCTURED)
-                {
-                    Var.Set(m_JointsBuffer->GetDefaultView(BUFFER_VIEW_SHADER_RESOURCE));
+                    if (m_Settings.JointsBufferMode == JOINTS_BUFFER_MODE_UNIFORM)
+                    {
+                        const Uint32 JointsBufferSize = GetJointsBufferSize();
+                        Var.SetBufferRange(pJointsBuffer, 0, JointsBufferSize);
+                    }
+                    else if (m_Settings.JointsBufferMode == JOINTS_BUFFER_MODE_STRUCTURED)
+                    {
+                        Var.Set(pJointsBuffer->GetDefaultView(BUFFER_VIEW_SHADER_RESOURCE));
+                    }
+                    else
+                    {
+                        UNEXPECTED("Unexpected joints buffer mode");
+                    }
                 }
                 else
                 {
-                    UNEXPECTED("Unexpected joints buffer mode");
+                    UNEXPECTED("Joints buffer is not initialized");
                 }
             }
         }
     }
 
-    if (pFrameAttribs != nullptr)
+    if (m_Settings.MaxActiveMorphTargetCount > 0)
     {
-        ShaderResourceVariableX{pSRB, SHADER_TYPE_VERTEX, "cbFrameAttribs"}.Set(pFrameAttribs);
+        if (ShaderResourceVariableX Var{pSRB, SHADER_TYPE_VERTEX, GetMorphTargetDeltasVarName()})
+        {
+            if (Var.Get() == nullptr)
+            {
+                IBuffer* const pMorphTargetBuffer = Attribs.pMorphTargetDeltas != nullptr ?
+                    Attribs.pMorphTargetDeltas :
+                    m_MorphTargetBuffer.RawPtr();
+
+                if (pMorphTargetBuffer != nullptr)
+                {
+                    Var.Set(pMorphTargetBuffer->GetDefaultView(BUFFER_VIEW_SHADER_RESOURCE));
+                }
+                else
+                {
+                    UNEXPECTED("Morph target buffer is not initialized");
+                }
+            }
+        }
     }
 
-    if (m_Settings.EnableIBL)
+    if (Attribs.pFrameAttribs != nullptr)
     {
-        ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_IrradianceMap"}.Set(m_pIrradianceCubeSRV);
-        ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_PrefilteredEnvMap"}.Set(m_pPrefilteredEnvMapSRV);
+        ShaderResourceVariableX{pSRB, SHADER_TYPE_VERTEX, "cbFrameAttribs"}.Set(Attribs.pFrameAttribs);
     }
 
-    if (m_Settings.EnableShadows && pShadowMap != nullptr)
+    if (m_Settings.EnableShadows && Attribs.pShadowMap != nullptr)
     {
-        ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_ShadowMap"}.Set(pShadowMap);
+        ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_ShadowMap"}.Set(Attribs.pShadowMap);
+    }
+}
+
+void PBR_Renderer::SetIBLResourceViews(IShaderResourceBinding* pSRB,
+                                       ITextureView*           pIrradianceCubeSRV,
+                                       ITextureView*           pPrefilteredEnvMapSRV,
+                                       ITextureView*           pPrefilteredSheenEnvMapSRV) const
+{
+    if (!m_Settings.EnableIBL)
+        return;
+
+    if (pSRB == nullptr)
+    {
+        UNEXPECTED("SRB must not be null");
+        return;
+    }
+
+    ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_IrradianceMap"}.Set(pIrradianceCubeSRV);
+    ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_PrefilteredEnvMap"}.Set(pPrefilteredEnvMapSRV);
+    if (m_Settings.EnableSheen)
+    {
+        ShaderResourceVariableX{pSRB, SHADER_TYPE_PIXEL, "g_PrefilteredSheenEnvMap"}.Set(
+            pPrefilteredSheenEnvMapSRV != nullptr ? pPrefilteredSheenEnvMapSRV : pPrefilteredEnvMapSRV);
     }
 }
 
@@ -1060,8 +1274,9 @@ void PBR_Renderer::SetMaterialTexture(IShaderResourceBinding* pSRB, ITextureView
         }
         else
         {
-            UNEXPECTED("Static material texture indices are not initialized, which indicates that the client uses a custom GetStaticShaderTextureIds function. "
-                       "In this case it is expected that the client binds the textures.");
+            UNEXPECTED("Renderer-wide static material texture indices are not initialized. "
+                       "This indicates that static texture indices are provided through PSOKey, "
+                       "in which case it is expected that the client binds the textures.");
         }
     }
     else if (m_Settings.ShaderTexturesArrayMode == SHADER_TEXTURE_ARRAY_MODE_DYNAMIC)
@@ -1072,6 +1287,57 @@ void PBR_Renderer::SetMaterialTexture(IShaderResourceBinding* pSRB, ITextureView
     {
         UNEXPECTED("Unexpected shader textures array mode");
     }
+}
+
+bool PBR_Renderer::SetMaterialTextures(IShaderResourceBinding* pSRB,
+                                       ITextureView* const*    ppTextureSRVs,
+                                       Uint32                  FirstTexture,
+                                       Uint32                  TextureCount) const
+{
+    if (pSRB == nullptr)
+    {
+        UNEXPECTED("SRB must not be null");
+        return false;
+    }
+    if (ppTextureSRVs == nullptr)
+    {
+        UNEXPECTED("Material texture SRV array must not be null");
+        return false;
+    }
+    if (TextureCount == 0)
+    {
+        UNEXPECTED("Material texture count must not be zero");
+        return false;
+    }
+    if (m_Settings.ShaderTexturesArrayMode == SHADER_TEXTURE_ARRAY_MODE_NONE)
+    {
+        UNEXPECTED("Material texture array mode must be enabled");
+        return false;
+    }
+    if (FirstTexture >= m_Settings.MaterialTexturesArraySize)
+    {
+        UNEXPECTED("First material texture index ", FirstTexture,
+                   " is outside the material texture array of size ", m_Settings.MaterialTexturesArraySize);
+        return false;
+    }
+    if (TextureCount > m_Settings.MaterialTexturesArraySize - FirstTexture)
+    {
+        UNEXPECTED("Material texture range [", FirstTexture, ", ", Uint64{FirstTexture} + TextureCount,
+                   ") exceeds the material texture array size ", m_Settings.MaterialTexturesArraySize);
+        return false;
+    }
+
+    IShaderResourceVariable* const pMatTexturesVar = pSRB->GetVariableByName(SHADER_TYPE_PIXEL, "g_MaterialTextures");
+    if (pMatTexturesVar == nullptr)
+        return false;
+
+    for (Uint32 TextureIndex = 0; TextureIndex < TextureCount; ++TextureIndex)
+    {
+        IDeviceObject* pObj[] = {ppTextureSRVs[TextureIndex]};
+        pMatTexturesVar->SetArray(pObj, TextureIndex, 1);
+    }
+
+    return true;
 }
 
 void PBR_Renderer::CreateSignature()
@@ -1093,6 +1359,11 @@ void PBR_Renderer::CreateSignature()
         SignatureDesc.AddResource(SHADER_TYPE_VERTEX, GetJointTransformsVarName(), JointsBufferResType, SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE);
     }
 
+    if (m_Settings.MaxActiveMorphTargetCount > 0)
+    {
+        SignatureDesc.AddResource(SHADER_TYPE_VERTEX, GetMorphTargetDeltasVarName(), SHADER_RESOURCE_TYPE_BUFFER_SRV, SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE);
+    }
+
     std::unordered_set<std::string> Samplers;
     if (!m_Device.GetDeviceInfo().IsGLDevice())
     {
@@ -1102,7 +1373,7 @@ void PBR_Renderer::CreateSignature()
 
     Uint32& MaterialTexturesArraySize = m_Settings.MaterialTexturesArraySize;
     if (m_Settings.ShaderTexturesArrayMode == SHADER_TEXTURE_ARRAY_MODE_STATIC &&
-        m_Settings.GetStaticShaderTextureIds == nullptr)
+        m_Settings.MaterialTexturesArraySize == 0)
     {
         MaterialTexturesArraySize = 0;
         m_StaticShaderTextureIds  = std::make_unique<StaticShaderTextureIdsArrayType>();
@@ -1185,6 +1456,12 @@ void PBR_Renderer::CreateSignature()
         AddMaterialTextureAndSampler(TEXTURE_ATTRIB_ID_SHEEN_ROUGHNESS, "g_Sheen_sampler", m_Settings.SheenMapImmutableSampler);
     }
 
+    if (m_Settings.EnableSpecular)
+    {
+        AddMaterialTextureAndSampler(TEXTURE_ATTRIB_ID_SPECULAR, "g_Specular_sampler", m_Settings.SpecularMapImmutableSampler);
+        AddMaterialTextureAndSampler(TEXTURE_ATTRIB_ID_SPECULAR_COLOR, "g_Specular_sampler", m_Settings.SpecularMapImmutableSampler);
+    }
+
     if (m_Settings.EnableAnisotropy)
     {
         AddMaterialTextureAndSampler(TEXTURE_ATTRIB_ID_ANISOTROPY, "g_AnisotropyMap_sampler", m_Settings.AnisotropyMapImmutableSampler);
@@ -1230,7 +1507,7 @@ void PBR_Renderer::CreateSignature()
     if (m_Settings.EnableTransmission)
     {
         constexpr WebGPUResourceAttribs WGPUSceneColor{WEB_GPU_BINDING_TYPE_DEFAULT, RESOURCE_DIM_TEX_2D};
-        AddTextureAndSampler("g_TransmissionSceneColor", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, WGPUSceneColor);
+        AddTextureAndSampler("g_TransmissionSceneColor", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_DYNAMIC, WGPUSceneColor);
     }
 
     if (m_Settings.EnableIBL)
@@ -1239,17 +1516,12 @@ void PBR_Renderer::CreateSignature()
         AddTextureAndSampler("g_PreintegratedGGX", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_STATIC);
         AddTextureAndSampler("g_IrradianceMap", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, WGPUCubeMap);
         AddTextureAndSampler("g_PrefilteredEnvMap", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, WGPUCubeMap);
-
         if (m_Settings.EnableSheen)
-        {
-            AddTextureAndSampler("g_PreintegratedCharlie", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_STATIC);
-        }
+            AddTextureAndSampler("g_PrefilteredSheenEnvMap", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, WGPUCubeMap);
     }
 
     if (m_Settings.EnableSheen)
-    {
-        AddTextureAndSampler("g_SheenAlbedoScalingLUT", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_STATIC);
-    }
+        AddTextureAndSampler("g_PreintegratedSheen", Sam_LinearClamp, "g_LinearClampSampler", SHADER_RESOURCE_VARIABLE_TYPE_STATIC);
 
     if (m_Settings.EnableShadows)
     {
@@ -1303,16 +1575,9 @@ void PBR_Renderer::CreateCustomSignature(PipelineResourceSignatureDescX&& Signat
     if (m_Settings.EnableIBL)
     {
         ResourceSignature->GetStaticVariableByName(SHADER_TYPE_PIXEL, "g_PreintegratedGGX")->Set(m_pPreintegratedGGX_SRV);
-        if (m_Settings.EnableSheen)
-        {
-            ResourceSignature->GetStaticVariableByName(SHADER_TYPE_PIXEL, "g_PreintegratedCharlie")->Set(m_pPreintegratedCharlie_SRV);
-        }
     }
-
     if (m_Settings.EnableSheen)
-    {
-        ResourceSignature->GetStaticVariableByName(SHADER_TYPE_PIXEL, "g_SheenAlbedoScalingLUT")->Set(m_pSheenAlbedoScaling_LUT_SRV);
-    }
+        ResourceSignature->GetStaticVariableByName(SHADER_TYPE_PIXEL, "g_PreintegratedSheen")->Set(m_pPreintegratedSheen_SRV);
     m_ResourceSignatures = {std::move(ResourceSignature)};
 }
 
@@ -1322,6 +1587,7 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
 
     ShaderMacroHelper Macros;
     Macros.Add("MAX_JOINT_COUNT", m_Settings.JointsBufferMode == JOINTS_BUFFER_MODE_UNIFORM ? static_cast<int>(m_Settings.MaxJointCount) : INT_MAX);
+    Macros.Add("MAX_ACTIVE_MORPH_TARGET_COUNT", static_cast<int>(m_Settings.MaxActiveMorphTargetCount));
     Macros.Add("JOINTS_BUFFER_MODE_UNIFORM", static_cast<int>(JOINTS_BUFFER_MODE_UNIFORM));
     Macros.Add("JOINTS_BUFFER_MODE_STRUCTURED", static_cast<int>(JOINTS_BUFFER_MODE_STRUCTURED));
     Macros.Add("JOINTS_BUFFER_MODE", static_cast<int>(m_Settings.JointsBufferMode));
@@ -1401,7 +1667,7 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
         Macros.Add("PCF_FILTER_SIZE", KernelSize);
     }
 
-    static_assert(static_cast<int>(DebugViewType::NumDebugViews) == 35, "Did you add debug view? You may need to handle it here.");
+    static_assert(static_cast<int>(DebugViewType::NumDebugViews) == 37, "Did you add debug view? You may need to handle it here.");
     // clang-format off
     Macros.Add("DEBUG_VIEW",                       static_cast<int>(Key.GetDebugView()));
     Macros.Add("DEBUG_VIEW_NONE",                  static_cast<int>(DebugViewType::None));
@@ -1431,6 +1697,8 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     Macros.Add("DEBUG_VIEW_SHEEN",                 static_cast<int>(DebugViewType::Sheen));
     Macros.Add("DEBUG_VIEW_SHEEN_COLOR",           static_cast<int>(DebugViewType::SheenColor));
     Macros.Add("DEBUG_VIEW_SHEEN_ROUGHNESS",       static_cast<int>(DebugViewType::SheenRoughness));
+    Macros.Add("DEBUG_VIEW_SPECULAR_FACTOR",       static_cast<int>(DebugViewType::SpecularFactor));
+    Macros.Add("DEBUG_VIEW_SPECULAR_COLOR_FACTOR", static_cast<int>(DebugViewType::SpecularColorFactor));
     Macros.Add("DEBUG_VIEW_ANISOTROPY_STRENGTH",   static_cast<int>(DebugViewType::AnisotropyStrength));
     Macros.Add("DEBUG_VIEW_ANISOTROPY_DIRECTION",  static_cast<int>(DebugViewType::AnisotropyDirection));
     Macros.Add("DEBUG_VIEW_IRIDESCENCE",           static_cast<int>(DebugViewType::Iridescence));
@@ -1449,7 +1717,7 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     Macros.Add("LOADING_ANIMATION_TRANSITIONING", static_cast<int>(LoadingAnimationMode::Transitioning));
     // clang-format on
 
-    static_assert(PSO_FLAG_LAST == PSO_FLAG_BIT(39), "Did you add new PSO Flag? You may need to handle it here.");
+    static_assert(PSO_FLAG_LAST == PSO_FLAG_BIT(43), "Did you add new PSO Flag? You may need to handle it here.");
 #define ADD_PSO_FLAG_MACRO(Flag) Macros.Add(#Flag, (PSOFlags & PSO_FLAG_##Flag) != PSO_FLAG_NONE)
     ADD_PSO_FLAG_MACRO(USE_COLOR_MAP);
     ADD_PSO_FLAG_MACRO(USE_NORMAL_MAP);
@@ -1468,6 +1736,8 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     ADD_PSO_FLAG_MACRO(USE_IRIDESCENCE_THICKNESS_MAP);
     ADD_PSO_FLAG_MACRO(USE_TRANSMISSION_MAP);
     ADD_PSO_FLAG_MACRO(USE_THICKNESS_MAP);
+    ADD_PSO_FLAG_MACRO(USE_SPECULAR_MAP);
+    ADD_PSO_FLAG_MACRO(USE_SPECULAR_COLOR_MAP);
 
     ADD_PSO_FLAG_MACRO(USE_VERTEX_COLORS);
     ADD_PSO_FLAG_MACRO(USE_VERTEX_NORMALS);
@@ -1475,6 +1745,7 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     ADD_PSO_FLAG_MACRO(USE_TEXCOORD0);
     ADD_PSO_FLAG_MACRO(USE_TEXCOORD1);
     ADD_PSO_FLAG_MACRO(USE_JOINTS);
+    ADD_PSO_FLAG_MACRO(USE_MORPH_TARGETS);
     ADD_PSO_FLAG_MACRO(ENABLE_CLEAR_COAT);
     ADD_PSO_FLAG_MACRO(ENABLE_SHEEN);
     ADD_PSO_FLAG_MACRO(ENABLE_ANISOTROPY);
@@ -1482,6 +1753,7 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     ADD_PSO_FLAG_MACRO(ENABLE_TRANSMISSION);
     ADD_PSO_FLAG_MACRO(ENABLE_VOLUME);
     ADD_PSO_FLAG_MACRO(ENABLE_TRANSMISSION_COMPOSITE);
+    ADD_PSO_FLAG_MACRO(ENABLE_SPECULAR);
 
     ADD_PSO_FLAG_MACRO(USE_IBL);
 
@@ -1500,13 +1772,48 @@ ShaderMacroHelper PBR_Renderer::DefineMacros(const PSOKey& Key) const
     Macros.Add("TEX_COLOR_CONVERSION_MODE_SRGB_TO_LINEAR", CreateInfo::TEX_COLOR_CONVERSION_MODE_SRGB_TO_LINEAR);
     Macros.Add("TEX_COLOR_CONVERSION_MODE", m_Settings.TexColorConversionMode);
 
+    // GL material texture arrays use the color sampler for every texture.
+    const bool UseSharedMaterialSampler = m_Device.GetDeviceInfo().IsGLDevice() &&
+        m_Settings.ShaderTexturesArrayMode != SHADER_TEXTURE_ARRAY_MODE_NONE;
+    const auto AddSamplerMaxAnisotropy = [&](const char* MacroName, const SamplerDesc& SamDesc) {
+        const SamplerDesc& EffectiveSamDesc = UseSharedMaterialSampler ? m_Settings.ColorMapImmutableSampler : SamDesc;
+        Uint32             MaxAnisotropy    = 1;
+        if (IsAnisotropicFilter(EffectiveSamDesc.MinFilter))
+        {
+            MaxAnisotropy = std::min(EffectiveSamDesc.MaxAnisotropy, Uint32{m_Device.GetAdapterInfo().Sampler.MaxAnisotropy});
+            MaxAnisotropy = std::max(MaxAnisotropy, 1u);
+        }
+        Macros.Add(MacroName, static_cast<float>(MaxAnisotropy));
+    };
+    AddSamplerMaxAnisotropy("PBR_BASE_COLOR_MAX_ANISOTROPY", m_Settings.ColorMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_NORMAL_MAX_ANISOTROPY", m_Settings.NormalMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_PHYS_DESC_MAX_ANISOTROPY", m_Settings.PhysDescMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_OCCLUSION_MAX_ANISOTROPY", m_Settings.AOMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_EMISSIVE_MAX_ANISOTROPY", m_Settings.EmissiveMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_CLEAR_COAT_MAX_ANISOTROPY", m_Settings.ClearCoatMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_SHEEN_MAX_ANISOTROPY", m_Settings.SheenMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_SPECULAR_MAX_ANISOTROPY", m_Settings.SpecularMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_ANISOTROPY_MAX_ANISOTROPY", m_Settings.AnisotropyMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_IRIDESCENCE_MAX_ANISOTROPY", m_Settings.IridescenceMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_TRANSMISSION_MAX_ANISOTROPY", m_Settings.TransmissionMapImmutableSampler);
+    AddSamplerMaxAnisotropy("PBR_THICKNESS_MAX_ANISOTROPY", m_Settings.ThicknessMapImmutableSampler);
+
     StaticShaderTextureIdsArrayType MaterialTextureIds;
     MaterialTextureIds.fill(decltype(PBR_Renderer::InvalidMaterialTextureId){InvalidMaterialTextureId});
     if (m_Settings.ShaderTexturesArrayMode == SHADER_TEXTURE_ARRAY_MODE_STATIC)
     {
-        MaterialTextureIds = m_Settings.GetStaticShaderTextureIds ?
-            m_Settings.GetStaticShaderTextureIds(Key) :
-            *m_StaticShaderTextureIds;
+        if (const StaticShaderTextureIdsArrayType* pKeyTextureIds = Key.GetStaticShaderTextureIds())
+        {
+            MaterialTextureIds = *pKeyTextureIds;
+        }
+        else if (m_StaticShaderTextureIds)
+        {
+            MaterialTextureIds = *m_StaticShaderTextureIds;
+        }
+        else if ((PSOFlags & PSO_FLAG_ALL_TEXTURES) != PSO_FLAG_NONE)
+        {
+            DEV_ERROR("Static material texture indices are not provided in the PSO key.");
+        }
     }
 
     // Tightly pack these attributes that are used by the shader
@@ -1701,6 +2008,9 @@ void PBR_Renderer::GetVSInputStructAndLayout(PSO_FLAGS         PSOFlags,
             }
         }
     }
+
+    if ((PSOFlags & PSO_FLAG_USE_MORPH_TARGETS) != 0)
+        ss << "    uint VertexID : SV_VertexID;" << std::endl;
 
     if (m_Settings.PrimitiveArraySize > 0 && !m_Device.GetDeviceInfo().Features.NativeMultiDraw)
     {
@@ -1906,8 +2216,8 @@ void PBR_Renderer::CreatePSO(PsoHashMapType&             PsoHashMap,
         Macros.Add("USE_GL_POINT_SIZE", "1");
     }
 
-    const bool IsTransmissionComposite = (PSOFlags & PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE) != PSO_FLAG_NONE;
-    const Uint32 OITLayerCount = (Key.GetType() == RenderPassType::OITLayers) ||
+    const bool   IsTransmissionComposite = (PSOFlags & PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE) != PSO_FLAG_NONE;
+    const Uint32 OITLayerCount           = (Key.GetType() == RenderPassType::OITLayers) ||
             (Key.GetType() == RenderPassType::Main && Key.GetAlphaMode() == ALPHA_MODE_BLEND && !IsTransmissionComposite) ?
         m_Settings.OITLayerCount :
         0;
@@ -2135,57 +2445,46 @@ PBR_Renderer::PsoCacheAccessor PBR_Renderer::GetPsoCacheAccessor(const GraphicsP
     return {*this, it->second, it->first};
 }
 
+PBR_Renderer::PSO_FLAGS PBR_Renderer::GetEnabledPSOFlags(const CreateInfo& Settings)
+{
+    PSO_FLAGS Flags = PSO_FLAG_ALL | PSO_FLAG_ALL_USER_DEFINED;
+
+    if (!Settings.EnableIBL)
+        Flags &= ~PSO_FLAG_USE_IBL;
+    if (!Settings.EnableAO)
+        Flags &= ~PSO_FLAG_USE_AO_MAP;
+    if (!Settings.EnableEmissive)
+        Flags &= ~PSO_FLAG_USE_EMISSIVE_MAP;
+    if (!Settings.EnableClearCoat)
+        Flags &= ~PSO_FLAG_ALL_CLEAR_COAT;
+    if (!Settings.EnableSheen)
+        Flags &= ~PSO_FLAG_ALL_SHEEN;
+    if (!Settings.EnableSpecular)
+        Flags &= ~PSO_FLAG_ALL_SPECULAR;
+    if (!Settings.EnableAnisotropy)
+        Flags &= ~PSO_FLAG_ALL_ANISOTROPY;
+    if (!Settings.EnableIridescence)
+        Flags &= ~PSO_FLAG_ALL_IRIDESCENCE;
+    if (!Settings.EnableTransmission)
+        Flags &= ~(PSO_FLAG_ALL_TRANSMISSION | PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE);
+    if (!Settings.EnableVolume)
+        Flags &= ~PSO_FLAG_ALL_VOLUME;
+    if (!Settings.EnableShadows)
+        Flags &= ~PSO_FLAG_ENABLE_SHADOWS;
+    if (Settings.MaxJointCount == 0)
+        Flags &= ~PSO_FLAG_USE_JOINTS;
+    if (Settings.MaxActiveMorphTargetCount == 0)
+        Flags &= ~PSO_FLAG_USE_MORPH_TARGETS;
+
+    return Flags;
+}
+
 IPipelineState* PBR_Renderer::GetPSO(PsoHashMapType&             PsoHashMap,
                                      const GraphicsPipelineDesc& GraphicsDesc,
                                      const PSOKey&               Key,
                                      PsoCacheAccessor::GET_FLAGS GetFlags)
 {
-    PSO_FLAGS Flags = Key.GetFlags();
-    if (!m_Settings.EnableIBL)
-    {
-        Flags &= ~PSO_FLAG_USE_IBL;
-    }
-    if (!m_Settings.EnableAO)
-    {
-        Flags &= ~PSO_FLAG_USE_AO_MAP;
-    }
-    if (!m_Settings.EnableEmissive)
-    {
-        Flags &= ~PSO_FLAG_USE_EMISSIVE_MAP;
-    }
-    if (!m_Settings.EnableClearCoat)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_CLEAR_COAT;
-    }
-    if (!m_Settings.EnableSheen)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_SHEEN;
-    }
-    if (!m_Settings.EnableAnisotropy)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_ANISOTROPY;
-    }
-    if (!m_Settings.EnableIridescence)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_IRIDESCENCE;
-    }
-    if (!m_Settings.EnableTransmission)
-    {
-        Flags &= ~(PSO_FLAG_ENABLE_TRANSMISSION | PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE);
-    }
-    if (!m_Settings.EnableVolume)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_VOLUME;
-    }
-    if (!m_Settings.EnableShadows)
-    {
-        Flags &= ~PSO_FLAG_ENABLE_SHADOWS;
-    }
-
-    if (m_Settings.MaxJointCount == 0)
-    {
-        Flags &= ~PSO_FLAG_USE_JOINTS;
-    }
+    PSO_FLAGS Flags = Key.GetFlags() & GetEnabledPSOFlags(m_Settings);
     if (m_Settings.UseSeparateMetallicRoughnessTextures)
     {
         DEV_CHECK_ERR((Flags & PSO_FLAG_USE_PHYS_DESC_MAP) == 0, "Physical descriptor map is not enabled");
@@ -2198,26 +2497,20 @@ IPipelineState* PBR_Renderer::GetPSO(PsoHashMapType&             PsoHashMap,
     {
         Flags &= ~PSO_FLAG_ENABLE_TEXCOORD_TRANSFORM;
     }
+    if ((Flags & PSO_FLAG_ENABLE_CLEAR_COAT) == 0)
+        Flags &= ~PSO_FLAG_ALL_CLEAR_COAT;
     if ((Flags & PSO_FLAG_ENABLE_SHEEN) == 0)
-    {
-        Flags &= ~(PSO_FLAG_USE_SHEEN_COLOR_MAP | PSO_FLAG_USE_SHEEN_ROUGHNESS_MAP);
-    }
+        Flags &= ~PSO_FLAG_ALL_SHEEN;
     if ((Flags & PSO_FLAG_ENABLE_ANISOTROPY) == 0)
-    {
-        Flags &= ~PSO_FLAG_USE_ANISOTROPY_MAP;
-    }
+        Flags &= ~PSO_FLAG_ALL_ANISOTROPY;
     if ((Flags & PSO_FLAG_ENABLE_IRIDESCENCE) == 0)
-    {
-        Flags &= ~(PSO_FLAG_USE_IRIDESCENCE_MAP | PSO_FLAG_USE_IRIDESCENCE_THICKNESS_MAP);
-    }
+        Flags &= ~PSO_FLAG_ALL_IRIDESCENCE;
     if ((Flags & PSO_FLAG_ENABLE_TRANSMISSION) == 0)
-    {
-        Flags &= ~(PSO_FLAG_USE_TRANSMISSION_MAP | PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE);
-    }
+        Flags &= ~(PSO_FLAG_ALL_TRANSMISSION | PSO_FLAG_ENABLE_TRANSMISSION_COMPOSITE);
     if ((Flags & PSO_FLAG_ENABLE_VOLUME) == 0)
-    {
-        Flags &= ~PSO_FLAG_USE_THICKNESS_MAP;
-    }
+        Flags &= ~PSO_FLAG_ALL_VOLUME;
+    if ((Flags & PSO_FLAG_ENABLE_SPECULAR) == 0)
+        Flags &= ~PSO_FLAG_ALL_SPECULAR;
 
     const PSOKey UpdatedKey{Flags, Key};
 
@@ -2464,9 +2757,15 @@ void PBR_Renderer::ApplyOITAttenuation(IDeviceContext* pCtx, IPipelineState* pPS
     pCtx->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
 }
 
-void PBR_Renderer::SetInternalShaderParameters(HLSL::PBRRendererShaderParameters& Renderer)
+void PBR_Renderer::SetInternalShaderParameters(HLSL::PBRRendererShaderParameters& Renderer,
+                                               ITextureView*                      pPrefilteredEnvMapSRV,
+                                               float                              EnvironmentYaw) const
 {
-    Renderer.PrefilteredCubeLastMip = m_Settings.EnableIBL ? static_cast<float>(m_pPrefilteredEnvMapSRV->GetTexture()->GetDesc().MipLevels - 1) : 0.f;
+    Renderer.PrefilteredCubeLastMip = m_Settings.EnableIBL && pPrefilteredEnvMapSRV != nullptr ?
+        static_cast<float>(pPrefilteredEnvMapSRV->GetTexture()->GetDesc().MipLevels - 1) :
+        0.f;
+
+    Renderer.EnvironmentRotation = float2{std::cos(EnvironmentYaw), std::sin(EnvironmentYaw)};
 }
 
 Uint32 PBR_Renderer::GetPBRPrimitiveAttribsSize(PSO_FLAGS Flags, Uint32 CustomDataSize) const
@@ -2478,32 +2777,59 @@ Uint32 PBR_Renderer::GetPBRPrimitiveAttribsSize(PSO_FLAGS Flags, Uint32 CustomDa
     //        float4x4 NodeMatrix;
     //        float4x4 PrevNodeMatrix; // #if COMPUTE_MOTION_VECTORS
     //
-    //        int   JointCount;
-    //        int   FirstJoint;
-    //        float PosBiasX;
-    //        float PosBiasY;
+    //        struct GLTFNodeSkinningShaderAttribs // #if USE_JOINTS
+    //        {
+    //            int JointCount;
+    //            int FirstJoint;
+    //            int PrevFirstJoint;
+    //            int Padding;
     //
-    //        float PosBiasZ;
-    //        float PosScaleX;
-    //        float PosScaleY;
-    //        float PosScaleZ;
-    //
-    //        float4x4 SkinPreTransform;     // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM
-    //        float4x4 PrevSkinPreTransform; // #if USE_JOINTS && USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
+    //            float4x4 PreTransform;     // #if USE_SKIN_PRE_TRANSFORM
+    //            float4x4 PrevPreTransform; // #if USE_SKIN_PRE_TRANSFORM && COMPUTE_MOTION_VECTORS
+    //        } Skinning;
     //    } Transforms;
+    //
+    //    struct PBRMorphTargetsShaderAttribs // #if USE_MORPH_TARGETS
+    //    {
+    //        uint VertexOffset;
+    //        uint Padding0;
+    //        uint Padding1;
+    //        uint Padding2;
+    //
+    //        PBRMorphTargetShaderAttribs Targets[MAX_ACTIVE_MORPH_TARGET_COUNT];
+    //        PBRMorphTargetShaderAttribs PrevTargets[MAX_ACTIVE_MORPH_TARGET_COUNT]; // #if COMPUTE_MOTION_VECTORS
+    //    } MorphTargets;
+    //
+    //    struct PBRVertexPositionUnpackShaderAttribs // #if VERTEX_POS_PACK_MODE != VERTEX_POS_PACK_MODE_NONE
+    //    {
+    //        float4 Bias;
+    //        float4 Scale;
+    //    } PositionUnpack;
     //
     //    float4      FallbackColor;
     //    UserDefined CustomData;
     //};
 
-    const bool UseSkinPreTransform     = m_Settings.UseSkinPreTransform && (Flags & PSO_FLAG_USE_JOINTS) != 0;
-    const bool UsePrevSkinPreTransform = UseSkinPreTransform && (Flags & PSO_FLAG_COMPUTE_MOTION_VECTORS) != 0;
+    const bool   UseSkinPreTransform     = m_Settings.UseSkinPreTransform && (Flags & PSO_FLAG_USE_JOINTS) != 0;
+    const bool   UsePrevSkinPreTransform = UseSkinPreTransform && (Flags & PSO_FLAG_COMPUTE_MOTION_VECTORS) != 0;
+    const bool   UseJoints               = (Flags & PSO_FLAG_USE_JOINTS) != 0;
+    const bool   UseMorphTargets         = m_Settings.MaxActiveMorphTargetCount != 0 && (Flags & PSO_FLAG_USE_MORPH_TARGETS) != 0;
+    const bool   UsePackedPosition       = m_Settings.VertexPosPackMode != VERTEX_POS_PACK_MODE_NONE;
+    const Uint32 MorphTargetDataSize     = UseMorphTargets ?
+        sizeof(float4) +
+            m_Settings.MaxActiveMorphTargetCount * sizeof(MorphTargetShaderAttribs) *
+                ((Flags & PSO_FLAG_COMPUTE_MOTION_VECTORS) != 0 ? 2u : 1u) :
+        0;
+
+    static_assert(sizeof(MorphTargetShaderAttribs) == sizeof(float4), "Unexpected morph target shader attributes size");
 
     return (sizeof(float4x4) +                                                   // Transforms.NodeMatrix
             ((Flags & PSO_FLAG_COMPUTE_MOTION_VECTORS) ? sizeof(float4x4) : 0) + // Transforms.PrevNodeMatrix
-            sizeof(int) * 2 + sizeof(float) * 6 +                                // Transforms.JointCount ... Transforms.PosScaleZ
-            (UseSkinPreTransform ? sizeof(float4x4) : 0) +                       // Transforms.SkinPreTransform
-            (UsePrevSkinPreTransform ? sizeof(float4x4) : 0) +                   // Transforms.PrevSkinPreTransform
+            (UseJoints ? sizeof(float4) : 0) +                                   // Transforms.Skinning.JointCount ... Padding
+            (UseSkinPreTransform ? sizeof(float4x4) : 0) +                       // Transforms.Skinning.PreTransform
+            (UsePrevSkinPreTransform ? sizeof(float4x4) : 0) +                   // Transforms.Skinning.PrevPreTransform
+            MorphTargetDataSize +                                                // MorphTargets
+            (UsePackedPosition ? sizeof(float4) * 2 : 0) +                       // PositionUnpack
 
             sizeof(float4) + // FallbackColor
             CustomDataSize);
@@ -2515,6 +2841,7 @@ Uint32 PBR_Renderer::GetPBRMaterialAttribsSize(PSO_FLAGS Flags) const
     // {
     //     PBRMaterialBasicAttribs        Basic;
     //     PBRMaterialSheenAttribs        Sheen;        // #if ENABLE_SHEEN
+    //     PBRMaterialSpecularAttribs     Specular;     // #if ENABLE_SPECULAR
     //     PBRMaterialAnisotropyAttribs   Anisotropy;   // #if ENABLE_ANISOTROPY
     //     PBRMaterialIridescenceAttribs  Iridescence;  // #if ENABLE_IRIDESCENCE
     //     PBRMaterialTransmissionAttribs Transmission; // #if ENABLE_TRANSMISSION
@@ -2534,6 +2861,7 @@ Uint32 PBR_Renderer::GetPBRMaterialAttribsSize(PSO_FLAGS Flags) const
 
     return (sizeof(HLSL::PBRMaterialBasicAttribs) +
             ((Flags & PSO_FLAG_ENABLE_SHEEN) ? sizeof(HLSL::PBRMaterialSheenAttribs) : 0) +
+            ((Flags & PSO_FLAG_ENABLE_SPECULAR) ? sizeof(HLSL::PBRMaterialSpecularAttribs) : 0) +
             ((Flags & PSO_FLAG_ENABLE_ANISOTROPY) ? sizeof(HLSL::PBRMaterialAnisotropyAttribs) : 0) +
             ((Flags & PSO_FLAG_ENABLE_IRIDESCENCE) ? sizeof(HLSL::PBRMaterialIridescenceAttribs) : 0) +
             ((Flags & PSO_FLAG_ENABLE_TRANSMISSION) ? sizeof(HLSL::PBRMaterialTransmissionAttribs) : 0) +
@@ -2611,7 +2939,7 @@ void* PBR_Renderer::WriteSkinningData(void* pDst, const WriteSkinningDataAttribs
 
 const char* PBR_Renderer::GetDebugViewTypeString(DebugViewType DebugView)
 {
-    static_assert(static_cast<int>(DebugViewType::NumDebugViews) == 35, "Please update the switch below to handle the new debug view type");
+    static_assert(static_cast<int>(DebugViewType::NumDebugViews) == 37, "Please update the switch below to handle the new debug view type");
     switch (DebugView)
     {
 #define DEBUG_VIEW_TYPE_CASE(Type) \
@@ -2644,6 +2972,8 @@ const char* PBR_Renderer::GetDebugViewTypeString(DebugViewType DebugView)
         DEBUG_VIEW_TYPE_CASE(Sheen);
         DEBUG_VIEW_TYPE_CASE(SheenColor);
         DEBUG_VIEW_TYPE_CASE(SheenRoughness);
+        DEBUG_VIEW_TYPE_CASE(SpecularFactor);
+        DEBUG_VIEW_TYPE_CASE(SpecularColorFactor);
         DEBUG_VIEW_TYPE_CASE(AnisotropyStrength);
         DEBUG_VIEW_TYPE_CASE(AnisotropyDirection);
         DEBUG_VIEW_TYPE_CASE(Iridescence);

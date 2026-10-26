@@ -1,0 +1,2286 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "TestingEnvironment.hpp"
+#include "TempDirectory.hpp"
+#include "gtest/gtest.h"
+
+#include "RadientEngine.h"
+#include "RadientTypesX.hpp"
+#include "RadientMaterials.h"
+#include "RadientStandardMaterialParameters.h"
+#include "Assets/RadientAssetManagerImpl.hpp"
+#include "Scene/RadientSceneImpl.hpp"
+#include "RadientTestAssetHelpers.hpp"
+#include "RadientAssetTestHelpers.hpp"
+#include "RadientTestDataHelpers.hpp"
+#include "RadientMaterialTestHelpers.hpp"
+
+#include "BasicMath.hpp"
+#include "ThreadPool.hpp"
+
+#include <array>
+#include <limits>
+#include <string>
+
+using namespace Diligent;
+using namespace Diligent::Testing;
+
+namespace
+{
+
+std::string WriteBasicGLTFFile(const TempDirectory& TempDir)
+{
+    return WriteGLTFFile(TempDir, "basic_scene.gltf",
+                         R"GLTF({
+    "asset": {"version": "2.0"},
+    "scene": 0,
+    "scenes": [{"nodes": [0]}],
+    "nodes": [{"name": "Root"}]
+})GLTF");
+}
+
+RefCntAutoPtr<IRadientEngine> CreateTestEngine(IThreadPool* pThreadPool = nullptr)
+{
+    RadientEngineCreateInfo EngineCI{};
+    EngineCI.pThreadPool = pThreadPool;
+
+    RefCntAutoPtr<IRadientEngine> pEngine;
+    EXPECT_EQ(CreateRadientEngine(EngineCI, &pEngine), RADIENT_STATUS_OK);
+    EXPECT_NE(pEngine, nullptr);
+
+    return pEngine;
+}
+
+RefCntAutoPtr<IRadientBackend> GetTestBackend(IRadientEngine& Engine)
+{
+    RefCntAutoPtr<IRadientBackend> pBackend;
+    EXPECT_EQ(Engine.GetBackend(&pBackend), RADIENT_STATUS_OK);
+    EXPECT_NE(pBackend, nullptr);
+
+    return pBackend;
+}
+
+RefCntAutoPtr<IRadientAssetManager> GetTestAssetManager(IRadientEngine& Engine)
+{
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager;
+    EXPECT_EQ(Engine.GetAssetManager(&pAssetManager), RADIENT_STATUS_OK);
+    EXPECT_NE(pAssetManager, nullptr);
+
+    return pAssetManager;
+}
+
+RefCntAutoPtr<IRadientMaterialAsset> CreateTestMaterial(IRadientAssetManager& AssetManager)
+{
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial;
+    EXPECT_EQ(
+        CreateStandardMaterialAsset(
+            AssetManager,
+            {},
+            [](IRadientMaterialDefinitionAsset& Definition,
+               IRadientMaterialWriter&          Writer) {
+                RadientMaterialParameterHandle BaseColorHandle;
+
+                RADIENT_STATUS Status = Definition.FindParameter(RadientStandardMaterialBaseColorFactorName,
+                                                                 &BaseColorHandle);
+                EXPECT_EQ(Status, RADIENT_STATUS_OK);
+                if (Status != RADIENT_STATUS_OK)
+                    return Status;
+
+                const RadientFloat4 BaseColorFactor{1.f, 0.f, 0.f, 1.f};
+                Status = Writer.SetParameter(BaseColorHandle, BaseColorFactor);
+                EXPECT_EQ(Status, RADIENT_STATUS_OK);
+                return Status;
+            },
+            pMaterial.GetAddressOfEmpty()),
+        RADIENT_STATUS_OK);
+    EXPECT_NE(pMaterial, nullptr);
+    if (pMaterial != nullptr)
+    {
+        EXPECT_NE(pMaterial->GetReference().URI, nullptr);
+        EXPECT_NE(pMaterial->GetReference().Version, 0u);
+    }
+
+    return pMaterial;
+}
+
+RefCntAutoPtr<IRadientMeshAsset> CreateTestMesh(IRadientAssetManager&  AssetManager,
+                                                IRadientMaterialAsset* pMaterial,
+                                                Float32                PositionOffset = 0.f)
+{
+    const RadientFloat3 Positions[] =
+        {
+            {0.f, 0.f, 0.f},
+            {1.f + PositionOffset, 0.f, 0.f},
+            {0.f, 1.f, 0.f},
+        };
+
+    const RadientColorRGBA8 Colors[] =
+        {
+            {255, 0, 0, 255},
+            {0, 255, 0, 255},
+            {0, 0, 255, 255},
+        };
+
+    const RadientBoneIndices4 BoneIndices[] =
+        {
+            {0, 0, 0, 0},
+            {0, 0, 0, 0},
+            {0, 0, 0, 0},
+        };
+
+    const RadientFloat4 BoneWeights[] =
+        {
+            {1.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+            {1.f, 0.f, 0.f, 0.f},
+        };
+
+    const Uint32 Indices[] = {0, 1, 2};
+
+    RadientMeshPrimitiveCreateInfo PrimitiveCI{};
+    PrimitiveCI.Name         = "Radient test primitive";
+    PrimitiveCI.FirstElement = 0;
+    PrimitiveCI.ElementCount = 3;
+    PrimitiveCI.pMaterial    = pMaterial;
+
+    RadientMeshCreateInfo MeshCI{};
+    MeshCI.Name = "Radient test mesh";
+    RadientVertexLayoutDescX VertexLayout;
+    VertexLayout.AddBuffer().AddAttribute("POSITION", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 3);
+    VertexLayout.AddBuffer().AddAttribute("COLOR_0", RADIENT_VERTEX_COMPONENT_TYPE_UINT8, 4, 1, RADIENT_VERTEX_AUTO_OFFSET, True);
+    VertexLayout.AddBuffer().AddAttribute("JOINTS_0", RADIENT_VERTEX_COMPONENT_TYPE_UINT16, 4, 2);
+    VertexLayout.AddBuffer().AddAttribute("WEIGHTS_0", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 4, 3);
+
+    const auto              pPositionsBlob   = MakeTestDataBlob(Positions, sizeof(Positions));
+    const auto              pColorsBlob      = MakeTestDataBlob(Colors, sizeof(Colors));
+    const auto              pBoneIndicesBlob = MakeTestDataBlob(BoneIndices, sizeof(BoneIndices));
+    const auto              pBoneWeightsBlob = MakeTestDataBlob(BoneWeights, sizeof(BoneWeights));
+    const auto              pIndexBlob       = MakeTestDataBlob(Indices, sizeof(Indices));
+    IRadientDataBlob* const VertexData[]{pPositionsBlob, pColorsBlob, pBoneIndicesBlob, pBoneWeightsBlob};
+
+    MeshCI.VertexData.VertexLayout    = VertexLayout;
+    MeshCI.VertexData.ppVertexBuffers = VertexData;
+    MeshCI.VertexData.VertexCount     = 3;
+    MeshCI.IndexData.pIndexBuffer     = pIndexBlob;
+    MeshCI.IndexData.IndexCount       = 3;
+    MeshCI.IndexData.IndexType        = RADIENT_INDEX_TYPE_UINT32;
+    MeshCI.pPrimitives                = &PrimitiveCI;
+    MeshCI.PrimitiveCount             = 1;
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh;
+    const RADIENT_STATUS             CreateStatus = AssetManager.CreateMesh(MeshCI, &pMesh);
+    EXPECT_TRUE(CreateStatus == RADIENT_STATUS_OK || CreateStatus == RADIENT_STATUS_PENDING);
+    EXPECT_NE(pMesh, nullptr);
+    if (pMesh != nullptr)
+    {
+        EXPECT_NE(pMesh->GetReference().URI, nullptr);
+        EXPECT_NE(pMesh->GetReference().Version, 0u);
+    }
+
+    return pMesh;
+}
+
+RefCntAutoPtr<IRadientScene> CreateTestScene(IRadientEngine& Engine)
+{
+    RadientSceneCreateInfo SceneCI{};
+    SceneCI.Desc.Name = "Radient test scene";
+
+    RefCntAutoPtr<IRadientScene> pScene;
+    EXPECT_EQ(Engine.CreateScene(SceneCI, &pScene), RADIENT_STATUS_OK);
+    EXPECT_NE(pScene, nullptr);
+    if (pScene != nullptr)
+        EXPECT_STREQ(pScene->GetDesc().Name, SceneCI.Desc.Name);
+
+    return pScene;
+}
+
+RefCntAutoPtr<IRadientSceneWriter> CreateTestSceneWriter(IRadientEngine& Engine, IRadientScene* pScene)
+{
+    RefCntAutoPtr<IRadientSceneWriter> pWriter;
+    EXPECT_EQ(Engine.CreateSceneWriter(pScene, &pWriter), RADIENT_STATUS_OK);
+    EXPECT_NE(pWriter, nullptr);
+
+    return pWriter;
+}
+
+RefCntAutoPtr<IRadientSceneImporter> CreateTestSceneImporter(IRadientEngine& Engine, IRadientSceneWriter* pWriter)
+{
+    RefCntAutoPtr<IRadientSceneImporter> pImporter;
+    EXPECT_EQ(Engine.CreateSceneImporter(pWriter, &pImporter), RADIENT_STATUS_OK);
+    EXPECT_NE(pImporter, nullptr);
+
+    return pImporter;
+}
+
+RefCntAutoPtr<IRadientRenderer> CreateTestRenderer(IRadientEngine& Engine)
+{
+    RadientRendererDesc RendererDesc{};
+    RendererDesc.Name = "Radient test renderer";
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer;
+    EXPECT_EQ(Engine.CreateRenderer(RendererDesc, &pRenderer), RADIENT_STATUS_OK);
+    EXPECT_NE(pRenderer, nullptr);
+    if (pRenderer != nullptr)
+        EXPECT_STREQ(pRenderer->GetDesc().Name, RendererDesc.Name);
+
+    return pRenderer;
+}
+
+RefCntAutoPtr<IRadientRenderTarget> CreateTestRenderTarget(IRadientRenderer& Renderer)
+{
+    RadientRenderTargetDesc TargetDesc{};
+    TargetDesc.Name = "Radient test target";
+    TargetDesc.Size = {640, 480};
+
+    RefCntAutoPtr<IRadientRenderTarget> pTarget;
+    EXPECT_EQ(Renderer.CreateRenderTarget(TargetDesc, &pTarget), RADIENT_STATUS_OK);
+    EXPECT_NE(pTarget, nullptr);
+    if (pTarget != nullptr)
+    {
+        EXPECT_STREQ(pTarget->GetDesc().Name, TargetDesc.Name);
+        EXPECT_EQ(pTarget->GetDesc().Size, TargetDesc.Size);
+    }
+
+    return pTarget;
+}
+
+RefCntAutoPtr<IRadientView> CreateTestView(IRadientRenderer&     Renderer,
+                                           IRadientScene*        pScene,
+                                           IRadientRenderTarget* pTarget,
+                                           RadientEntityID       Camera = InvalidRadientEntityID)
+{
+    RadientViewDesc ViewDesc{};
+    ViewDesc.Name          = "Radient test view";
+    ViewDesc.pScene        = pScene;
+    ViewDesc.Camera        = Camera;
+    ViewDesc.pRenderTarget = pTarget;
+
+    RefCntAutoPtr<IRadientView> pView;
+    EXPECT_EQ(Renderer.CreateView(ViewDesc, &pView), RADIENT_STATUS_OK);
+    EXPECT_NE(pView, nullptr);
+    if (pView != nullptr)
+    {
+        EXPECT_STREQ(pView->GetDesc().Name, ViewDesc.Name);
+        EXPECT_EQ(pView->GetDesc().pScene, pScene);
+        EXPECT_EQ(pView->GetDesc().Camera, Camera);
+        EXPECT_EQ(pView->GetDesc().pRenderTarget, pTarget);
+    }
+
+    return pView;
+}
+
+RadientEntityID CreateTestRenderableEntity(IRadientSceneWriter&   Writer,
+                                           IRadientMeshAsset*     pMesh,
+                                           IRadientMaterialAsset* pMaterial)
+{
+    RadientEntityID Entity = InvalidRadientEntityID;
+    EXPECT_EQ(Writer.CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    EXPECT_NE(Entity, InvalidRadientEntityID);
+
+    if (Entity == InvalidRadientEntityID)
+        return Entity;
+
+    RadientMeshComponent MeshComponent{};
+    MeshComponent.pMesh = pMesh;
+    EXPECT_EQ(Writer.SetMesh(Entity, MeshComponent), RADIENT_STATUS_OK);
+    EXPECT_EQ(Writer.SetMeshRenderer(Entity, {}), RADIENT_STATUS_OK);
+
+    RadientMaterialBinding MaterialBinding{};
+    MaterialBinding.PrimitiveIndex = 0;
+    MaterialBinding.pMaterial      = pMaterial;
+
+    RadientMaterialBindingsComponent MaterialBindings{};
+    MaterialBindings.pBindings    = &MaterialBinding;
+    MaterialBindings.BindingCount = 1;
+    EXPECT_EQ(Writer.SetMaterialBindings(Entity, MaterialBindings), RADIENT_STATUS_OK);
+
+    return Entity;
+}
+
+TEST(RadientSceneTest, Create)
+{
+    // Verifies direct scene implementation creation returns a valid interface.
+    RefCntAutoPtr<IRadientScene> pScene = RadientSceneImpl::Create();
+    EXPECT_NE(pScene, nullptr);
+}
+
+TEST(RadientSceneTest, GetRootEntities)
+{
+    // The public API copies roots in ID order, including invisible roots,
+    // and limits the output to the caller's capacity.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    Uint32 Written = 123;
+    EXPECT_EQ(pScene->GetRootEntityCount(), 0u);
+    EXPECT_EQ(pScene->GetRootEntities(0, nullptr, Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 0u);
+    Written = 123;
+    EXPECT_EQ(pScene->GetRootEntities(1, nullptr, Written), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(Written, 0u);
+
+    std::array<RadientEntityID, 3>       Roots{};
+    const std::array<RadientEntityID, 3> EmptyOutput = Roots;
+    EXPECT_EQ(pScene->GetRootEntities(static_cast<Uint32>(Roots.size()), Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 0u);
+    EXPECT_EQ(Roots, EmptyOutput);
+
+    RadientEntityID First  = InvalidRadientEntityID;
+    RadientEntityID Second = InvalidRadientEntityID;
+    RadientEntityID Child  = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, First), RADIENT_STATUS_OK);
+    RadientEntityDesc Desc;
+    Desc.Parent = First;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Child), RADIENT_STATUS_OK);
+    Desc.Parent = InvalidRadientEntityID;
+    Desc.Flags  = RADIENT_ENTITY_FLAG_NONE;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Second), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetRootEntityCount(), 2u);
+
+    Written = 123;
+    EXPECT_EQ(pScene->GetRootEntities(0, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 0u);
+    EXPECT_EQ(Roots, EmptyOutput);
+    Written = 123;
+    EXPECT_EQ(pScene->GetRootEntities(1, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 1u);
+    EXPECT_EQ(Roots[0], First);
+    EXPECT_EQ(Roots[1], InvalidRadientEntityID);
+    EXPECT_EQ(Roots[2], InvalidRadientEntityID);
+    Written = 123;
+    EXPECT_EQ(pScene->GetRootEntities(0, nullptr, Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 0u);
+    Written = 123;
+    EXPECT_EQ(pScene->GetRootEntities(2, nullptr, Written), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(Written, 0u);
+
+    const RadientSceneRevisions Revisions = pScene->GetSceneRevisions();
+    ASSERT_EQ(pScene->GetRootEntities(2, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 2u);
+    EXPECT_EQ(Roots[0], First);
+    EXPECT_EQ(Roots[1], Second);
+    EXPECT_EQ(Roots[2], InvalidRadientEntityID);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    // Detaching an older child inserts it by ID, not at the end of the roots.
+    ASSERT_EQ(pWriter->SetParent(Child, InvalidRadientEntityID, False), RADIENT_STATUS_OK);
+    EXPECT_EQ(pScene->GetRootEntityCount(), 3u);
+    ASSERT_EQ(pScene->GetRootEntities(3, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 3u);
+    EXPECT_EQ(Roots[0], First);
+    EXPECT_EQ(Roots[1], Child);
+    EXPECT_EQ(Roots[2], Second);
+
+    // Returned IDs belong to the caller; editing them does not alter the set.
+    Roots[0] = InvalidRadientEntityID;
+    ASSERT_EQ(pScene->GetRootEntities(3, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Roots[0], First);
+    ASSERT_EQ(pWriter->DestroyEntity(Child), RADIENT_STATUS_OK);
+    Roots.fill(InvalidRadientEntityID);
+    ASSERT_EQ(pScene->GetRootEntities(3, Roots.data(), Written), RADIENT_STATUS_OK);
+    EXPECT_EQ(Written, 2u);
+    EXPECT_EQ(Roots[0], First);
+    EXPECT_EQ(Roots[1], Second);
+    EXPECT_EQ(Roots[2], InvalidRadientEntityID);
+}
+
+TEST(RadientSceneTest, GetEntityName)
+{
+    // Names are copied during creation, allow duplicates and empty strings,
+    // and are discoverable through the public scene interface.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    const Char* Name = "unchanged";
+    EXPECT_EQ(pScene->GetEntityName(InvalidRadientEntityID, Name), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Name, nullptr);
+
+    RadientEntityID Unnamed = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Unnamed), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Unnamed, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "");
+
+    std::string       SourceName = "Cube";
+    RadientEntityDesc Desc;
+    Desc.Name             = SourceName.c_str();
+    RadientEntityID Named = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Named), RADIENT_STATUS_OK);
+    SourceName[0] = 'T';
+    ASSERT_EQ(pScene->GetEntityName(Named, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "Cube");
+
+    Desc.Name                 = "Cube";
+    RadientEntityID Duplicate = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Duplicate), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Duplicate, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "Cube");
+
+    Desc.Name             = "";
+    RadientEntityID Empty = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Empty), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Empty, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "");
+
+    // Reacquire borrowed names after destruction can compact entity storage.
+    ASSERT_EQ(pWriter->DestroyEntity(Unnamed), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->SetParent(Duplicate, Named, False), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->CommitChanges(), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Named, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "Cube");
+    ASSERT_EQ(pScene->GetEntityName(Duplicate, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "Cube");
+
+    ASSERT_EQ(pWriter->DestroyEntity(Named), RADIENT_STATUS_OK);
+    Name = "unchanged";
+    EXPECT_EQ(pScene->GetEntityName(Named, Name), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Name, nullptr);
+    Name = "unchanged";
+    EXPECT_EQ(pScene->GetEntityName(Duplicate, Name), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Name, nullptr);
+}
+
+TEST(RadientSceneWriterTest, SetEntityName)
+{
+    // Renaming copies the input and is immediately visible without changing
+    // renderer revisions. Empty names and borrowed input are supported.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    EXPECT_EQ(pWriter->SetEntityName(InvalidRadientEntityID, "Name"), RADIENT_STATUS_NOT_FOUND);
+    RadientEntityID Entity = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions = pScene->GetSceneRevisions();
+    EXPECT_EQ(pWriter->SetEntityName(Entity, nullptr), RADIENT_STATUS_NO_CHANGE);
+    EXPECT_EQ(pWriter->SetEntityName(Entity, ""), RADIENT_STATUS_NO_CHANGE);
+
+    std::string SourceName = "A renamed entity with a name longer than small string storage";
+    ASSERT_EQ(pWriter->SetEntityName(Entity, SourceName.c_str()), RADIENT_STATUS_OK);
+    SourceName[0]    = 'B';
+    const Char* Name = nullptr;
+    ASSERT_EQ(pScene->GetEntityName(Entity, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "A renamed entity with a name longer than small string storage");
+    EXPECT_EQ(pWriter->SetEntityName(Entity, Name), RADIENT_STATUS_NO_CHANGE);
+
+    // The input may point into the scene's current string.
+    EXPECT_EQ(pWriter->SetEntityName(Entity, Name + 2), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Entity, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "renamed entity with a name longer than small string storage");
+    EXPECT_EQ(pWriter->SetEntityName(Entity, "Cube"), RADIENT_STATUS_OK);
+    EXPECT_EQ(pWriter->SetEntityName(Entity, "Cube"), RADIENT_STATUS_NO_CHANGE);
+    EXPECT_EQ(pWriter->SetEntityName(Entity, "cube"), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Entity, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "cube");
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    // Different entities may share a name, including one borrowed from a peer.
+    RadientEntityID Other = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Other), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Entity, Name), RADIENT_STATUS_OK);
+    EXPECT_EQ(pWriter->SetEntityName(Other, Name), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Other, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "cube");
+
+    EXPECT_EQ(pWriter->SetEntityName(Entity, nullptr), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Entity, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "");
+    EXPECT_EQ(pWriter->SetEntityName(Entity, ""), RADIENT_STATUS_NO_CHANGE);
+    EXPECT_EQ(pWriter->SetEntityName(Other, ""), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetEntityName(Other, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "");
+
+    ASSERT_EQ(pWriter->DestroyEntity(Entity), RADIENT_STATUS_OK);
+    EXPECT_EQ(pWriter->SetEntityName(Entity, "Gone"), RADIENT_STATUS_NOT_FOUND);
+}
+
+TEST(RadientSceneTest, GetMesh)
+{
+    // Mesh inspection borrows the asset, reflects replacement immediately,
+    // and clears the output for missing components and destroyed entities.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+    RefCntAutoPtr<IRadientMeshAsset> pMesh{MakeNewRCObj<TestMeshAsset>()("mesh", 1u)};
+    RefCntAutoPtr<IRadientMeshAsset> pReplacement{MakeNewRCObj<TestMeshAsset>()("replacement", 1u)};
+
+    RadientMeshComponent Mesh{pMesh};
+    EXPECT_EQ(pScene->GetMesh(InvalidRadientEntityID, Mesh), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Mesh.pMesh, nullptr);
+
+    RadientEntityID Entity = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    Mesh.pMesh = pMesh;
+    EXPECT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Mesh.pMesh, nullptr);
+
+    ASSERT_EQ(pWriter->SetMesh(Entity, {pMesh}), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions      = pScene->GetSceneRevisions();
+    const Int32                 ReferenceCount = pMesh->GetReferenceCounters()->GetNumStrongRefs();
+    ASSERT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_OK);
+    EXPECT_EQ(Mesh.pMesh, pMesh.RawPtr());
+    EXPECT_EQ(pMesh->GetReferenceCounters()->GetNumStrongRefs(), ReferenceCount);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    // Retaining a borrowed asset keeps it usable after its component changes.
+    RefCntAutoPtr<IRadientMeshAsset> pRetainedMesh{Mesh.pMesh};
+    ASSERT_EQ(pWriter->SetMesh(Entity, {pReplacement}), RADIENT_STATUS_OK);
+    pMesh.Release();
+    EXPECT_STREQ(pRetainedMesh->GetReference().URI, "mesh");
+    ASSERT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_OK);
+    EXPECT_EQ(Mesh.pMesh, pReplacement.RawPtr());
+
+    ASSERT_EQ(pWriter->RemoveComponent(Entity, RADIENT_COMPONENT_TYPE_MESH), RADIENT_STATUS_OK);
+    EXPECT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Mesh.pMesh, nullptr);
+
+    ASSERT_EQ(pWriter->SetMesh(Entity, {pReplacement}), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->DestroyEntity(Entity), RADIENT_STATUS_OK);
+    Mesh.pMesh = pReplacement;
+    EXPECT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Mesh.pMesh, nullptr);
+}
+
+TEST(RadientSceneTest, GetMeshRenderer)
+{
+    // Read back renderer settings before and after changes, without needing
+    // a mesh or a scene commit. Missing renderers return default values.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    RadientMeshRendererComponent Renderer{0x1234u};
+    EXPECT_EQ(pScene->GetMeshRenderer(InvalidRadientEntityID, Renderer), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Renderer, RadientMeshRendererComponent{});
+
+    RadientEntityID Entity = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    Renderer.VisibilityMask = 0;
+    EXPECT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Renderer, RadientMeshRendererComponent{});
+
+    const RadientMeshRendererComponent Expected{Uint64{1} << 42};
+    ASSERT_EQ(pWriter->SetMeshRenderer(Entity, Expected), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions = pScene->GetSceneRevisions();
+    ASSERT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_OK);
+    EXPECT_EQ(Renderer, Expected);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    Renderer.VisibilityMask = 0;
+    ASSERT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_OK);
+    EXPECT_EQ(Renderer, Expected);
+    ASSERT_EQ(pWriter->SetMeshRenderer(Entity, {0}), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_OK);
+    EXPECT_EQ(Renderer.VisibilityMask, 0u);
+
+    ASSERT_EQ(pWriter->RemoveComponent(Entity, RADIENT_COMPONENT_TYPE_MESH_RENDERER), RADIENT_STATUS_OK);
+    EXPECT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Renderer, RadientMeshRendererComponent{});
+
+    ASSERT_EQ(pWriter->SetMeshRenderer(Entity, Expected), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->DestroyEntity(Entity), RADIENT_STATUS_OK);
+    Renderer = Expected;
+    EXPECT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Renderer, RadientMeshRendererComponent{});
+}
+
+TEST(RadientSceneTest, GetMaterialBindings)
+{
+    // Expose the scene-owned override array and distinguish an empty component
+    // from an absent one. The getter does not retain the returned materials.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial{MakeNewRCObj<TestMaterialAsset>()("material", 1u)};
+    RefCntAutoPtr<IRadientMaterialAsset> pReplacement{MakeNewRCObj<TestMaterialAsset>()("replacement", 1u)};
+
+    std::array<RadientMaterialBinding, 3> Source{{{2, pMaterial}, {0, nullptr}, {1, pReplacement}}};
+    RadientMaterialBindingsComponent      Bindings{Source.data(), static_cast<Uint32>(Source.size())};
+    EXPECT_EQ(pScene->GetMaterialBindings(InvalidRadientEntityID, Bindings), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+
+    RadientEntityID Other = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Other), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->SetMaterialBindings(Other, {Source.data(), 1}), RADIENT_STATUS_OK);
+
+    RadientEntityID Entity = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    Bindings = {Source.data(), static_cast<Uint32>(Source.size())};
+    EXPECT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, {Source.data(), static_cast<Uint32>(Source.size())}), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions      = pScene->GetSceneRevisions();
+    const Int32                 ReferenceCount = pMaterial->GetReferenceCounters()->GetNumStrongRefs();
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_EQ(Bindings.BindingCount, Source.size());
+    ASSERT_NE(Bindings.pBindings, nullptr);
+    EXPECT_NE(Bindings.pBindings, Source.data());
+    for (Uint32 Index = 0; Index < Bindings.BindingCount; ++Index)
+    {
+        EXPECT_EQ(Bindings.pBindings[Index], Source[Index]);
+    }
+    EXPECT_EQ(pMaterial->GetReferenceCounters()->GetNumStrongRefs(), ReferenceCount);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    // Mutating the input array cannot change the scene's copy. An unrelated
+    // component removal may compact storage but must preserve these bindings.
+    Source[0] = {3, pReplacement};
+    ASSERT_EQ(pWriter->RemoveComponent(Other, RADIENT_COMPONENT_TYPE_MATERIAL_BINDINGS), RADIENT_STATUS_OK);
+    EXPECT_EQ(Bindings.pBindings[0].PrimitiveIndex, 2u);
+    EXPECT_EQ(Bindings.pBindings[0].pMaterial, pMaterial.RawPtr());
+    const RadientMaterialBinding* pBorrowedBindings = Bindings.pBindings;
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    EXPECT_EQ(Bindings.pBindings, pBorrowedBindings);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pRetainedMaterial{Bindings.pBindings[0].pMaterial};
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, {Source.data(), 1}), RADIENT_STATUS_OK);
+    pMaterial.Release();
+    EXPECT_STREQ(pRetainedMaterial->GetReference().URI, "material");
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_EQ(Bindings.BindingCount, 1u);
+    EXPECT_EQ(Bindings.pBindings[0], Source[0]);
+
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, {}), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+
+    ASSERT_EQ(pWriter->RemoveComponent(Entity, RADIENT_COMPONENT_TYPE_MATERIAL_BINDINGS), RADIENT_STATUS_OK);
+    Bindings = {Source.data(), 1};
+    EXPECT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, {Source.data(), 1}), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->DestroyEntity(Entity), RADIENT_STATUS_OK);
+    Bindings = {Source.data(), 1};
+    EXPECT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+}
+
+TEST(RadientSceneTest, SetMaterialBindingsFromBorrowedArray)
+{
+    // Round-trip the getter's array through the setter while the scene owns
+    // the only strong references. Shrinking either end must retain survivors
+    // and release only the removed overrides.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pFirst  = MakeTestMaterialAsset("material://first", 1);
+    RefCntAutoPtr<IRadientMaterialAsset> pMiddle = MakeTestMaterialAsset("material://middle", 1);
+    RefCntAutoPtr<IRadientMaterialAsset> pLast   = MakeTestMaterialAsset("material://last", 1);
+    RefCntWeakPtr<IRadientMaterialAsset> WeakFirst{pFirst.RawPtr()};
+    RefCntWeakPtr<IRadientMaterialAsset> WeakMiddle{pMiddle.RawPtr()};
+    RefCntWeakPtr<IRadientMaterialAsset> WeakLast{pLast.RawPtr()};
+
+    const RadientMaterialBinding Source[] = {{2, pFirst}, {4, pMiddle}, {6, pLast}};
+    RadientEntityID              Entity   = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity({}, Entity), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, {Source, 3}), RADIENT_STATUS_OK);
+    pFirst.Release();
+    pMiddle.Release();
+    pLast.Release();
+
+    RadientMaterialBindingsComponent Bindings;
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions = pScene->GetSceneRevisions();
+    EXPECT_EQ(pWriter->SetMaterialBindings(Entity, Bindings), RADIENT_STATUS_NO_CHANGE);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    --Bindings.BindingCount;
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_NE(WeakFirst.Lock(), nullptr);
+    ASSERT_NE(WeakMiddle.Lock(), nullptr);
+    EXPECT_EQ(WeakLast.Lock(), nullptr);
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_EQ(Bindings.BindingCount, 2u);
+    EXPECT_EQ(Bindings.pBindings[0].PrimitiveIndex, 2u);
+    EXPECT_STREQ(Bindings.pBindings[0].pMaterial->GetReference().URI, "material://first");
+    EXPECT_EQ(Bindings.pBindings[1].PrimitiveIndex, 4u);
+    EXPECT_STREQ(Bindings.pBindings[1].pMaterial->GetReference().URI, "material://middle");
+
+    ++Bindings.pBindings;
+    --Bindings.BindingCount;
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    EXPECT_EQ(WeakFirst.Lock(), nullptr);
+    ASSERT_NE(WeakMiddle.Lock(), nullptr);
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_EQ(Bindings.BindingCount, 1u);
+    EXPECT_EQ(Bindings.pBindings[0].PrimitiveIndex, 4u);
+    EXPECT_STREQ(Bindings.pBindings[0].pMaterial->GetReference().URI, "material://middle");
+
+    Bindings.BindingCount = 0;
+    ASSERT_EQ(pWriter->SetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    EXPECT_EQ(WeakMiddle.Lock(), nullptr);
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    EXPECT_EQ(Bindings.BindingCount, 0u);
+    EXPECT_EQ(Bindings.pBindings, nullptr);
+}
+
+TEST(RadientSceneTest, GetLight)
+{
+    // Light inspection returns authored component values, independently of
+    // visibility and transforms, and does not change scene revisions.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    RadientLightComponent Light;
+    Light.Intensity = 42.f;
+    EXPECT_EQ(pScene->GetLight(InvalidRadientEntityID, Light), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Light, RadientLightComponent{});
+
+    RadientEntityDesc Desc;
+    Desc.Flags              = RADIENT_ENTITY_FLAG_NONE;
+    Desc.Transform.Position = {1.f, 2.f, 3.f};
+    RadientEntityID Entity  = InvalidRadientEntityID;
+    ASSERT_EQ(pWriter->CreateEntity(Desc, Entity), RADIENT_STATUS_OK);
+    Light.Intensity = 42.f;
+    EXPECT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Light, RadientLightComponent{});
+
+    RadientLightComponent Expected;
+    Expected.Type                   = RADIENT_LIGHT_TYPE_SPOT;
+    Expected.Color                  = {0.2f, 0.4f, 0.6f};
+    Expected.Intensity              = 42.f;
+    Expected.Range                  = 20.f;
+    Expected.Exposure               = 2.f;
+    Expected.Diffuse                = 0.5f;
+    Expected.Specular               = 0.75f;
+    Expected.Normalize              = True;
+    Expected.EnableColorTemperature = True;
+    Expected.ColorTemperature       = 5000.f;
+    Expected.Radius                 = 0.25f;
+    Expected.Angle                  = 1.f;
+    Expected.InnerConeAngle         = 0.1f;
+    Expected.OuterConeAngle         = 0.4f;
+    Expected.ShapingFocus           = 0.3f;
+    ASSERT_EQ(pWriter->SetLight(Entity, Expected), RADIENT_STATUS_OK);
+    const RadientSceneRevisions Revisions = pScene->GetSceneRevisions();
+    ASSERT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_OK);
+    EXPECT_EQ(Light, Expected);
+    EXPECT_EQ(pScene->GetSceneRevisions(), Revisions);
+
+    Light.Intensity = 0.f;
+    ASSERT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_OK);
+    EXPECT_EQ(Light, Expected);
+    Expected.Type      = RADIENT_LIGHT_TYPE_POINT;
+    Expected.Intensity = 17.f;
+    ASSERT_EQ(pWriter->SetLight(Entity, Expected), RADIENT_STATUS_OK);
+    ASSERT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_OK);
+    EXPECT_EQ(Light, Expected);
+
+    ASSERT_EQ(pWriter->RemoveComponent(Entity, RADIENT_COMPONENT_TYPE_LIGHT), RADIENT_STATUS_OK);
+    EXPECT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Light, RadientLightComponent{});
+
+    ASSERT_EQ(pWriter->SetLight(Entity, Expected), RADIENT_STATUS_OK);
+    ASSERT_EQ(pWriter->DestroyEntity(Entity), RADIENT_STATUS_OK);
+    Light = Expected;
+    EXPECT_EQ(pScene->GetLight(Entity, Light), RADIENT_STATUS_NOT_FOUND);
+    EXPECT_EQ(Light, RadientLightComponent{});
+}
+
+TEST(RadientEngineTest, CreateBackend)
+{
+    // The default engine should expose a local backend instance.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientBackend> pBackend = GetTestBackend(*pEngine);
+    ASSERT_NE(pBackend, nullptr);
+    EXPECT_EQ(pBackend->GetDesc().Type, RADIENT_BACKEND_TYPE_LOCAL);
+}
+
+TEST(RadientEngineTest, CreateAssetManager)
+{
+    // The engine owns an asset manager that can be queried through the public API.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    EXPECT_NE(pAssetManager, nullptr);
+}
+
+TEST(RadientEngineTest, CreateWithExternalThreadPool)
+{
+    // Passing an external thread pool should be accepted and used by engine
+    // services such as the asset manager.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RadientEngineCreateInfo EngineCI{};
+    EngineCI.pThreadPool = pThreadPool;
+
+    RefCntAutoPtr<IRadientEngine> pEngine;
+    EXPECT_EQ(CreateRadientEngine(EngineCI, &pEngine), RADIENT_STATUS_OK);
+    EXPECT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    EXPECT_NE(pAssetManager, nullptr);
+
+    pThreadPool->StopThreads();
+}
+
+TEST(RadientAssetManagerTest, CreateMesh)
+{
+    // Creating a mesh should accept vertex/index buffers and primitive material
+    // references, returning a usable asset reference.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateTestMaterial(*pAssetManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh = CreateTestMesh(*pAssetManager, pMaterial);
+    ASSERT_NE(pMesh, nullptr);
+    EXPECT_NE(pMesh->GetReference().URI, nullptr);
+    EXPECT_NE(pMesh->GetReference().Version, 0u);
+}
+
+TEST(RadientAssetManagerTest, CreateMeshDeduplicatesIdenticalRawData)
+{
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateTestMaterial(*pAssetManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh0 = CreateTestMesh(*pAssetManager, pMaterial);
+    RefCntAutoPtr<IRadientMeshAsset> pMesh1 = CreateTestMesh(*pAssetManager, pMaterial);
+
+    ASSERT_NE(pMesh0, nullptr);
+    ASSERT_NE(pMesh1, nullptr);
+    const RADIENT_STATUS MeshStatus0 = WaitForAssetLoad(pMesh0, *pThreadPool);
+    const RADIENT_STATUS MeshStatus1 = WaitForAssetLoad(pMesh1, *pThreadPool);
+    EXPECT_EQ(MeshStatus0, RADIENT_STATUS_OK);
+    EXPECT_EQ(MeshStatus1, RADIENT_STATUS_OK);
+    EXPECT_EQ(RadientMeshAssetManager::GetGPUResourceStatus(pMesh0), RADIENT_STATUS_NO_GPU_DATA);
+    EXPECT_EQ(RadientMeshAssetManager::GetGPUResourceStatus(pMesh1), RADIENT_STATUS_NO_GPU_DATA);
+    EXPECT_NE(pMesh0.RawPtr(), pMesh1.RawPtr());
+
+    const MeshPayloadImpl* pMeshPayload0 = RadientMeshAssetManager::GetMeshPayload(pMesh0);
+    ASSERT_NE(pMeshPayload0, nullptr);
+    EXPECT_EQ(RadientMeshAssetManager::GetMeshPayload(pMesh1), pMeshPayload0);
+}
+
+TEST(RadientAssetManagerTest, CreateMeshDifferentRawDataUsesDifferentPayload)
+{
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateTestMaterial(*pAssetManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh0 = CreateTestMesh(*pAssetManager, pMaterial);
+    RefCntAutoPtr<IRadientMeshAsset> pMesh1 = CreateTestMesh(*pAssetManager, pMaterial, 0.5f);
+
+    ASSERT_NE(pMesh0, nullptr);
+    ASSERT_NE(pMesh1, nullptr);
+    const RADIENT_STATUS MeshStatus0 = WaitForAssetLoad(pMesh0, *pThreadPool);
+    const RADIENT_STATUS MeshStatus1 = WaitForAssetLoad(pMesh1, *pThreadPool);
+    EXPECT_EQ(MeshStatus0, RADIENT_STATUS_OK);
+    EXPECT_EQ(MeshStatus1, RADIENT_STATUS_OK);
+    EXPECT_EQ(RadientMeshAssetManager::GetGPUResourceStatus(pMesh0), RADIENT_STATUS_NO_GPU_DATA);
+    EXPECT_EQ(RadientMeshAssetManager::GetGPUResourceStatus(pMesh1), RADIENT_STATUS_NO_GPU_DATA);
+    EXPECT_NE(pMesh0.RawPtr(), pMesh1.RawPtr());
+
+    const MeshPayloadImpl* pMeshPayload0 = RadientMeshAssetManager::GetMeshPayload(pMesh0);
+    ASSERT_NE(pMeshPayload0, nullptr);
+    EXPECT_NE(RadientMeshAssetManager::GetMeshPayload(pMesh1), pMeshPayload0);
+}
+
+TEST(RadientAssetManagerTest, LoadScene)
+{
+    // LoadScene should reject missing input, then accept a valid URI and finish
+    // through WaitForAssetLoad.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RadientSceneLoadInfo              SceneLoadInfo{};
+    RefCntAutoPtr<IRadientSceneAsset> pGLTFModel;
+    // A missing URI is invalid and should not create an asset reference.
+    {
+        TestingEnvironment::ErrorScope ExpectedErrors{"URI must not be null or empty"};
+        EXPECT_EQ(pAssetManager->LoadScene(SceneLoadInfo, &pGLTFModel), RADIENT_STATUS_INVALID_ARGUMENT);
+    }
+
+    TempDirectory     TempDir{"RadientAssetManagerTest"};
+    const std::string GLTFPath = WriteBasicGLTFFile(TempDir);
+
+    SceneLoadInfo.URI               = GLTFPath.c_str();
+    const RADIENT_STATUS LoadStatus = pAssetManager->LoadScene(SceneLoadInfo, &pGLTFModel);
+    // Depending on threading, the load may complete immediately or remain pending.
+    EXPECT_TRUE(LoadStatus == RADIENT_STATUS_OK || LoadStatus == RADIENT_STATUS_PENDING);
+    ASSERT_NE(pGLTFModel, nullptr);
+    EXPECT_NE(pGLTFModel->GetReference().URI, nullptr);
+    EXPECT_STREQ(pGLTFModel->GetReference().URI, SceneLoadInfo.URI);
+    EXPECT_NE(pGLTFModel->GetReference().Version, 0u);
+    EXPECT_EQ(WaitForAssetLoad(pGLTFModel, *pThreadPool), RADIENT_STATUS_OK);
+    EXPECT_EQ(RadientAssetManagerImpl::GetSceneGPUResourceStatus(pGLTFModel), RADIENT_STATUS_NO_GPU_DATA);
+}
+
+TEST(RadientAssetManagerTest, RejectsLoadsWithoutThreadPool)
+{
+    RefCntAutoPtr<RadientAssetManagerImpl> pAssetManager = RadientAssetManagerImpl::Create({});
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RadientSceneLoadInfo SceneLoadInfo{};
+    SceneLoadInfo.URI = "no_thread_pool.gltf";
+
+    RefCntAutoPtr<IRadientSceneAsset> pGLTFModel;
+    EXPECT_EQ(pAssetManager->LoadScene(SceneLoadInfo, &pGLTFModel), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pGLTFModel, nullptr);
+
+    std::array<Uint8, 4> TextureData{1, 2, 3, 4};
+
+    Uint32 PixelReadReleases = 0;
+    auto   pPixelBlob        = MakeTestDataBlob(TextureData.data(), TextureData.size(), CountBlobReadReleases, &PixelReadReleases);
+    ASSERT_NE(pPixelBlob, nullptr);
+    RefCntWeakPtr<IRadientDataBlob> WeakPixelBlob{pPixelBlob.RawPtr()};
+
+    RadientTextureLoadInfoX TextureLoadInfo{};
+    RadientTextureDataX     PixelData{1, 1, RADIENT_TEXTURE_FORMAT_RGBA8_UNORM};
+    PixelData.SetGenerateMips(True);
+    PixelData.AddMip(pPixelBlob);
+    TextureLoadInfo.SetTextureData(PixelData);
+
+    RefCntAutoPtr<IRadientTextureAsset> pTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(TextureLoadInfo, &pTexture), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pTexture, nullptr);
+    EXPECT_EQ(PixelReadReleases, 0u);
+    pPixelBlob.Release();
+    PixelData.Clear();
+    TextureLoadInfo.Clear();
+    EXPECT_EQ(WeakPixelBlob.Lock(), nullptr);
+
+    Uint32 ReadReleases = 0;
+    auto   pBlob        = MakeTestDataBlob(TextureData.data(), TextureData.size(), CountBlobReadReleases, &ReadReleases);
+    ASSERT_NE(pBlob, nullptr);
+    TextureLoadInfo = {};
+    TextureLoadInfo.SetDataBlob(pBlob);
+    EXPECT_EQ(pAssetManager->LoadTexture(TextureLoadInfo, &pTexture), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pTexture, nullptr);
+    EXPECT_EQ(ReadReleases, 0u);
+}
+
+TEST(RadientAssetManagerTest, MethodsFailAfterStop)
+{
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RadientEngineCreateInfo EngineCI{};
+    EngineCI.pThreadPool = pThreadPool;
+
+    RefCntAutoPtr<IRadientEngine> pEngine;
+    ASSERT_EQ(CreateRadientEngine(EngineCI, &pEngine), RADIENT_STATUS_OK);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialDefinitionAsset> pSourceMaterialDefinition;
+    ASSERT_EQ(pAssetManager->CreateStandardMaterialDefinition(
+                  {}, pSourceMaterialDefinition.GetAddressOfEmpty()),
+              RADIENT_STATUS_OK);
+    ASSERT_NE(pSourceMaterialDefinition, nullptr);
+
+    EXPECT_EQ(pAssetManager->Stop(nullptr), RADIENT_STATUS_OK);
+    RefCntAutoPtr<IRadientMeshAsset>               pMesh;
+    RefCntAutoPtr<IRadientMaterialDefinitionAsset> pMaterialDefinition;
+    RefCntAutoPtr<IRadientMaterialAsset>           pMaterial;
+    RefCntAutoPtr<IRadientTextureAsset>            pTexture;
+    RefCntAutoPtr<IRadientSceneAsset>              pScene;
+
+    EXPECT_EQ(pAssetManager->CreateStandardMaterialDefinition(RadientStandardMaterialDefinitionCreateInfo{}, pMaterialDefinition.GetAddressOfEmpty()),
+              RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pMaterialDefinition, nullptr);
+
+    EXPECT_EQ(pAssetManager->CreateMaterial(pSourceMaterialDefinition, pMaterial.GetAddressOfEmpty()),
+              RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pMaterial, nullptr);
+
+    EXPECT_EQ(pAssetManager->CreateMesh(RadientMeshCreateInfo{}, pMesh.GetAddressOfEmpty()), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pMesh, nullptr);
+
+    static constexpr std::array<Uint8, 4> TextureData       = {1, 2, 3, 4};
+    Uint32                                PixelReadReleases = 0;
+    auto                                  pPixelBlob        = MakeTestDataBlob(TextureData.data(), TextureData.size(), CountBlobReadReleases, &PixelReadReleases);
+    ASSERT_NE(pPixelBlob, nullptr);
+    RefCntWeakPtr<IRadientDataBlob> WeakPixelBlob{pPixelBlob.RawPtr()};
+    RadientTextureLoadInfoX         TextureLoadInfo;
+    RadientTextureDataX             PixelData{1, 1, RADIENT_TEXTURE_FORMAT_RGBA8_UNORM};
+    PixelData.SetGenerateMips(True);
+    PixelData.AddMip(pPixelBlob);
+    TextureLoadInfo.SetTextureData(PixelData);
+    EXPECT_EQ(pAssetManager->LoadTexture(TextureLoadInfo, pTexture.GetAddressOfEmpty()), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pTexture, nullptr);
+    EXPECT_EQ(PixelReadReleases, 0u);
+    pPixelBlob.Release();
+    PixelData.Clear();
+    TextureLoadInfo.Clear();
+    EXPECT_EQ(WeakPixelBlob.Lock(), nullptr);
+
+    Uint32 ReadReleases = 0;
+    auto   pBlob        = MakeTestDataBlob(TextureData.data(), TextureData.size(), CountBlobReadReleases, &ReadReleases);
+    ASSERT_NE(pBlob, nullptr);
+    TextureLoadInfo = {};
+    TextureLoadInfo.SetDataBlob(pBlob);
+    EXPECT_EQ(pAssetManager->LoadTexture(TextureLoadInfo, &pTexture), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pTexture, nullptr);
+    EXPECT_EQ(ReadReleases, 0u);
+
+    const RadientSceneLoadInfo SceneLoadInfo{"test://scene_after_stop.gltf"};
+    EXPECT_EQ(pAssetManager->LoadScene(SceneLoadInfo, pScene.GetAddressOfEmpty()), RADIENT_STATUS_INVALID_OPERATION);
+    EXPECT_EQ(pScene, nullptr);
+
+    pThreadPool->StopThreads();
+}
+
+TEST(RadientAssetManagerTest, DeduplicatesGLTFLoads)
+{
+    // Loading two aliases of the same glTF should create distinct lightweight
+    // asset handles that resolve to the same cached scene payload.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    TempDirectory     TempDir{"RadientAssetManagerTest"};
+    const std::string GLTFPath = WriteBasicGLTFFile(TempDir);
+
+    RadientSceneLoadInfo LoadInfo{};
+    LoadInfo.URI = GLTFPath.c_str();
+
+    const size_t FileNamePos = GLTFPath.find_last_of("/\\");
+    ASSERT_NE(FileNamePos, std::string::npos);
+    const std::string GLTFAliasPath =
+        GLTFPath.substr(0, FileNamePos + 1) + "unused/../" + GLTFPath.substr(FileNamePos + 1);
+
+    RadientSceneLoadInfo AliasLoadInfo = LoadInfo;
+    AliasLoadInfo.URI                  = GLTFAliasPath.c_str();
+
+    RefCntAutoPtr<IRadientSceneAsset> pFirstModel;
+    const RADIENT_STATUS              FirstLoadStatus = pAssetManager->LoadScene(LoadInfo, &pFirstModel);
+    ASSERT_TRUE(FirstLoadStatus == RADIENT_STATUS_OK || FirstLoadStatus == RADIENT_STATUS_PENDING);
+    ASSERT_NE(pFirstModel, nullptr);
+    ASSERT_EQ(WaitForAssetLoad(pFirstModel, *pThreadPool), RADIENT_STATUS_OK);
+    ASSERT_EQ(RadientAssetManagerImpl::GetSceneGPUResourceStatus(pFirstModel), RADIENT_STATUS_NO_GPU_DATA);
+
+    RefCntAutoPtr<IRadientSceneAsset> pSecondModel;
+    const RADIENT_STATUS              SecondLoadStatus = pAssetManager->LoadScene(AliasLoadInfo, &pSecondModel);
+    EXPECT_TRUE(SecondLoadStatus == RADIENT_STATUS_OK || SecondLoadStatus == RADIENT_STATUS_PENDING);
+    ASSERT_NE(pSecondModel, nullptr);
+    ASSERT_EQ(WaitForAssetLoad(pSecondModel, *pThreadPool), RADIENT_STATUS_OK);
+    ASSERT_EQ(RadientAssetManagerImpl::GetSceneGPUResourceStatus(pSecondModel), RADIENT_STATUS_NO_GPU_DATA);
+    EXPECT_NE(pSecondModel.RawPtr(), pFirstModel.RawPtr());
+    ASSERT_NE(pSecondModel->GetReference().URI, nullptr);
+    ASSERT_NE(pFirstModel->GetReference().URI, nullptr);
+    EXPECT_STREQ(pFirstModel->GetReference().URI, LoadInfo.URI);
+    EXPECT_STREQ(pSecondModel->GetReference().URI, AliasLoadInfo.URI);
+    EXPECT_STRNE(pSecondModel->GetReference().URI, pFirstModel->GetReference().URI);
+    EXPECT_EQ(RadientAssetManagerImpl::GetImportedScene(pSecondModel), RadientAssetManagerImpl::GetImportedScene(pFirstModel));
+}
+
+TEST(RadientAssetManagerTest, TextureWithSourceURIKeepsSourceURI)
+{
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RadientEngineCreateInfo EngineCI{};
+    EngineCI.pThreadPool = pThreadPool;
+
+    RefCntAutoPtr<IRadientEngine> pEngine;
+    ASSERT_EQ(CreateRadientEngine(EngineCI, &pEngine), RADIENT_STATUS_OK);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RadientTextureLoadInfoX LoadInfo{};
+    LoadInfo.SetURI("Textures/TestAlbedo.png");
+    auto pBlob = MakeTestDataBlob(TransparentPng.data(), TransparentPng.size());
+    ASSERT_NE(pBlob, nullptr);
+    LoadInfo.SetDataBlob(pBlob).SetEncodedTextureSRGB(True);
+
+    RefCntAutoPtr<IRadientTextureAsset> pTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(LoadInfo, &pTexture), RADIENT_STATUS_PENDING);
+    ASSERT_NE(pTexture, nullptr);
+    ASSERT_NE(pTexture->GetReference().URI, nullptr);
+    EXPECT_STREQ(pTexture->GetReference().URI, LoadInfo.Get().URI);
+
+    while (pThreadPool->GetQueueSize() != 0)
+    {
+        pThreadPool->ProcessTask(0, false);
+    }
+}
+
+TEST(RadientAssetManagerTest, DeduplicatesPendingTextureLoads)
+{
+    // Duplicate texture requests should create distinct lightweight assets that
+    // resolve to the same cached payload when the workers run.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RadientEngineCreateInfo EngineCI{};
+    EngineCI.pThreadPool = pThreadPool;
+
+    RefCntAutoPtr<IRadientEngine> pEngine;
+    ASSERT_EQ(CreateRadientEngine(EngineCI, &pEngine), RADIENT_STATUS_OK);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RadientTextureLoadInfoX LoadInfo{};
+    auto                    pBlob = MakeTestDataBlob(TransparentPng.data(), TransparentPng.size());
+    ASSERT_NE(pBlob, nullptr);
+    LoadInfo.SetDataBlob(pBlob).SetEncodedTextureSRGB(True);
+
+    RefCntAutoPtr<IRadientTextureAsset> pFirstTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(LoadInfo, &pFirstTexture), RADIENT_STATUS_PENDING);
+    ASSERT_NE(pFirstTexture, nullptr);
+
+    RefCntAutoPtr<IRadientTextureAsset> pSecondTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(LoadInfo, &pSecondTexture), RADIENT_STATUS_PENDING);
+    ASSERT_NE(pSecondTexture, nullptr);
+    EXPECT_NE(pSecondTexture.RawPtr(), pFirstTexture.RawPtr());
+    ASSERT_NE(pSecondTexture->GetReference().URI, nullptr);
+    ASSERT_NE(pFirstTexture->GetReference().URI, nullptr);
+    EXPECT_STRNE(pSecondTexture->GetReference().URI, pFirstTexture->GetReference().URI);
+
+    Uint32 CacheHitReadReleases = 0;
+
+    auto pDuplicateBlob = MakeTestDataBlob(TransparentPng.data(), TransparentPng.size(),
+                                           CountBlobReadReleases, &CacheHitReadReleases);
+    ASSERT_NE(pDuplicateBlob, nullptr);
+
+    RadientTextureLoadInfoX OwnedLoadInfo = LoadInfo;
+    OwnedLoadInfo.SetDataBlob(pDuplicateBlob);
+
+    RefCntAutoPtr<IRadientTextureAsset> pOwnedDuplicateTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(OwnedLoadInfo, &pOwnedDuplicateTexture), RADIENT_STATUS_PENDING);
+    ASSERT_NE(pOwnedDuplicateTexture, nullptr);
+    EXPECT_NE(pOwnedDuplicateTexture.RawPtr(), pFirstTexture.RawPtr());
+    ASSERT_NE(pOwnedDuplicateTexture->GetReference().URI, nullptr);
+    EXPECT_STRNE(pOwnedDuplicateTexture->GetReference().URI, pFirstTexture->GetReference().URI);
+
+    RadientTextureLoadInfoX LinearLoadInfo = LoadInfo;
+    LinearLoadInfo.SetEncodedTextureSRGB(False);
+
+    RefCntAutoPtr<IRadientTextureAsset> pLinearTexture;
+    EXPECT_EQ(pAssetManager->LoadTexture(LinearLoadInfo, &pLinearTexture), RADIENT_STATUS_PENDING);
+    ASSERT_NE(pLinearTexture, nullptr);
+    EXPECT_NE(pLinearTexture.RawPtr(), pFirstTexture.RawPtr());
+
+    // Queued loads retain the blobs after the client releases its references.
+    pBlob.Release();
+    pDuplicateBlob.Release();
+
+    while (pThreadPool->GetQueueSize() != 0)
+    {
+        pThreadPool->ProcessTask(0, false);
+    }
+
+    const TexturePayloadImpl* pFirstPayload = RadientTextureAssetManager::GetTexturePayload(pFirstTexture);
+    ASSERT_NE(pFirstPayload, nullptr);
+    EXPECT_EQ(RadientTextureAssetManager::GetTexturePayload(pSecondTexture), pFirstPayload);
+    EXPECT_EQ(RadientTextureAssetManager::GetTexturePayload(pOwnedDuplicateTexture), pFirstPayload);
+    EXPECT_NE(RadientTextureAssetManager::GetTexturePayload(pLinearTexture), pFirstPayload);
+
+    EXPECT_EQ(CacheHitReadReleases, 1u);
+
+    pThreadPool->StopThreads();
+}
+
+TEST(RadientEngineTest, CreateScene)
+{
+    // Scene creation should preserve the public scene description.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    EXPECT_NE(pScene, nullptr);
+}
+
+TEST(RadientEngineTest, CreateSceneWriter)
+{
+    // A writer can be created for an existing scene and used for mutations.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+    EXPECT_EQ(pWriter->GetScene(), pScene);
+}
+
+TEST(RadientEngineTest, CreateSceneImporter)
+{
+    // A scene importer can be created on top of a scene writer.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    RefCntAutoPtr<IRadientSceneImporter> pImporter = CreateTestSceneImporter(*pEngine, pWriter);
+    EXPECT_NE(pImporter, nullptr);
+}
+
+TEST(RadientSceneImporterTest, ImportScene)
+{
+    // Public ImportScene should reject invalid load info and then import a
+    // simple valid glTF into a live scene root.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientSceneImporter> pImporter = CreateTestSceneImporter(*pEngine, pWriter);
+    ASSERT_NE(pImporter, nullptr);
+
+    RadientSceneInstantiateInfo InstantiateInfo{};
+    InstantiateInfo.Name = "Radient imported GLTF root";
+
+    RefCntAutoPtr<IRadientSceneAsset> ImportedModel;
+    RadientEntityID                   ImportedRoot = InvalidRadientEntityID;
+    // Empty load info is invalid and should not instantiate anything.
+    {
+        TestingEnvironment::ErrorScope ExpectedErrors{"URI must not be null or empty"};
+        EXPECT_EQ(pImporter->ImportScene({}, InstantiateInfo, &ImportedModel, ImportedRoot), RADIENT_STATUS_INVALID_ARGUMENT);
+    }
+
+    TempDirectory     ImportTempDir{"RadientSceneTest"};
+    const std::string ImportScenePath = WriteBasicGLTFFile(ImportTempDir);
+
+    RadientSceneLoadInfo SceneLoadInfo{};
+    SceneLoadInfo.URI = ImportScenePath.c_str();
+
+    RADIENT_STATUS ImportStatus = pImporter->ImportScene(SceneLoadInfo, InstantiateInfo, &ImportedModel, ImportedRoot);
+    if (ImportStatus == RADIENT_STATUS_PENDING)
+    {
+        // Pending loads are completed explicitly in tests so the imported root
+        // can be verified deterministically.
+        ASSERT_EQ(WaitForAssetLoad(ImportedModel, *pThreadPool), RADIENT_STATUS_OK);
+        ImportStatus = pImporter->ProcessPendingImports();
+    }
+    EXPECT_EQ(ImportStatus, RADIENT_STATUS_OK);
+    ASSERT_NE(ImportedModel, nullptr);
+    EXPECT_NE(ImportedModel->GetReference().URI, nullptr);
+    EXPECT_NE(ImportedModel->GetReference().Version, 0u);
+    EXPECT_NE(ImportedRoot, InvalidRadientEntityID);
+    EXPECT_EQ(pScene->IsEntityAlive(ImportedRoot), RADIENT_STATUS_OK);
+
+    // Only the instantiation root is parentless; the authored nodes are children.
+    EXPECT_EQ(pScene->GetRootEntityCount(), 1u);
+    RadientEntityID Root     = InvalidRadientEntityID;
+    Uint32          NumRoots = 0;
+    ASSERT_EQ(pScene->GetRootEntities(1, &Root, NumRoots), RADIENT_STATUS_OK);
+    EXPECT_EQ(NumRoots, 1u);
+    EXPECT_EQ(Root, ImportedRoot);
+
+    // Read the names on the returned import root and its authored child.
+    const Char* Name = nullptr;
+    ASSERT_EQ(pScene->GetEntityName(ImportedRoot, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, InstantiateInfo.Name);
+
+    RadientEntityID ImportedNode = InvalidRadientEntityID;
+    Uint32          Written      = 0;
+    ASSERT_EQ(pScene->GetChildren(ImportedRoot, 0, 1, &ImportedNode, Written), RADIENT_STATUS_OK);
+    ASSERT_EQ(Written, 1u);
+    ASSERT_EQ(pScene->GetEntityName(ImportedNode, Name), RADIENT_STATUS_OK);
+    EXPECT_STREQ(Name, "Root");
+}
+
+TEST(RadientSceneWriterTest, CreateRenderableEntity)
+{
+    // A renderable scene entity requires mesh, mesh-renderer, and material
+    // binding data to be accepted by the writer.
+    RefCntAutoPtr<IThreadPool> pThreadPool = CreateThreadPool(ThreadPoolCreateInfo{0});
+    ASSERT_NE(pThreadPool, nullptr);
+
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine(pThreadPool);
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateTestMaterial(*pAssetManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh = CreateTestMesh(*pAssetManager, pMaterial);
+    ASSERT_NE(pMesh, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    const RadientEntityID Entity = CreateTestRenderableEntity(*pWriter, pMesh, pMaterial);
+    EXPECT_NE(Entity, InvalidRadientEntityID);
+
+    // Inspect the live entity and follow its mesh to the default material.
+    ASSERT_EQ(WaitForAssetLoad(pMesh, *pThreadPool), RADIENT_STATUS_OK);
+    RadientMeshComponent Mesh;
+    ASSERT_EQ(pScene->GetMesh(Entity, Mesh), RADIENT_STATUS_OK);
+    ASSERT_EQ(Mesh.pMesh, pMesh.RawPtr());
+    const RadientMeshAssetDesc& MeshDesc = Mesh.pMesh->GetDesc();
+    ASSERT_EQ(MeshDesc.PrimitiveCount, 1u);
+    EXPECT_EQ(MeshDesc.pPrimitives[0].pMaterial, pMaterial.RawPtr());
+
+    RadientMeshRendererComponent Renderer;
+    EXPECT_EQ(pScene->GetMeshRenderer(Entity, Renderer), RADIENT_STATUS_OK);
+    EXPECT_EQ(Renderer, RadientMeshRendererComponent{});
+
+    RadientMaterialBindingsComponent Bindings;
+    ASSERT_EQ(pScene->GetMaterialBindings(Entity, Bindings), RADIENT_STATUS_OK);
+    ASSERT_EQ(Bindings.BindingCount, 1u);
+    EXPECT_EQ(Bindings.pBindings[0].PrimitiveIndex, 0u);
+    EXPECT_EQ(Bindings.pBindings[0].pMaterial, pMaterial.RawPtr());
+}
+
+TEST(RadientEngineTest, CreateRenderer)
+{
+    // Renderer creation should preserve the public renderer description.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    EXPECT_NE(pRenderer, nullptr);
+}
+
+TEST(RadientRendererTest, CreateRenderTarget)
+{
+    // Render targets should preserve name and size metadata after creation.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientRenderTarget> pTarget = CreateTestRenderTarget(*pRenderer);
+    EXPECT_NE(pTarget, nullptr);
+}
+
+TEST(RadientRendererTest, CreateView)
+{
+    // Views keep persistent scene/camera/target state that can be reused by
+    // subsequent render calls.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientRenderTarget> pTarget = CreateTestRenderTarget(*pRenderer);
+    ASSERT_NE(pTarget, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView = CreateTestView(*pRenderer, pScene, pTarget);
+    ASSERT_NE(pView, nullptr);
+
+    // View setters update the descriptor returned to callers.
+    EXPECT_EQ(pView->SetCamera(42), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().Camera, 42);
+
+    EXPECT_EQ(pView->SetScene(nullptr), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().pScene, nullptr);
+
+    EXPECT_EQ(pView->SetRenderTarget(nullptr), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().pRenderTarget, nullptr);
+
+    const RadientFloat4 DefaultClearColor{};
+    EXPECT_EQ(pView->GetDesc().ClearColor, DefaultClearColor);
+
+    const RadientFloat4 ClearColor{0.1f, 0.2f, 0.3f, 0.4f};
+    EXPECT_EQ(pView->SetClearColor(ClearColor), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().ClearColor, ClearColor);
+    EXPECT_EQ(pView->SetClearColor(ClearColor), RADIENT_STATUS_NO_CHANGE);
+
+    EXPECT_EQ(pView->GetDesc().DebugVisualization, RADIENT_DEBUG_VISUALIZATION_NONE);
+    EXPECT_EQ(pView->SetDebugVisualization(RADIENT_DEBUG_VISUALIZATION_BASE_COLOR), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().DebugVisualization, RADIENT_DEBUG_VISUALIZATION_BASE_COLOR);
+    EXPECT_EQ(pView->SetDebugVisualization(RADIENT_DEBUG_VISUALIZATION_BASE_COLOR), RADIENT_STATUS_NO_CHANGE);
+
+    EXPECT_EQ(pView->GetDesc().EnableIBL, True);
+    EXPECT_EQ(pView->SetIBLEnabled(False), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().EnableIBL, False);
+    EXPECT_EQ(pView->SetIBLEnabled(False), RADIENT_STATUS_NO_CHANGE);
+
+    // Environment settings are view-local and retain the referenced texture asset.
+    const RadientEnvironmentDesc& DefaultEnvironment = pView->GetDesc().Environment;
+    const RadientFloat3           DefaultColor{1.f, 1.f, 1.f};
+    EXPECT_EQ(DefaultEnvironment.pEnvironmentMap, nullptr);
+    EXPECT_EQ(DefaultEnvironment.Color, DefaultColor);
+    EXPECT_EQ(DefaultEnvironment.Intensity, 1.f);
+    EXPECT_EQ(DefaultEnvironment.Exposure, 0.f);
+    EXPECT_EQ(DefaultEnvironment.Yaw, 0.f);
+    EXPECT_EQ(DefaultEnvironment.SphereMapRow0IsNegativeY, False);
+
+    RefCntAutoPtr<IRadientTextureAsset> pEnvironmentMap = MakeTestTextureAsset("texture://environment", 7);
+
+    RadientEnvironmentDesc Environment{};
+    Environment.pEnvironmentMap          = pEnvironmentMap;
+    Environment.Color                    = {0.25f, 0.5f, 1.f};
+    Environment.Intensity                = 2.f;
+    Environment.Exposure                 = -1.f;
+    Environment.Yaw                      = PI_F * 0.5f;
+    Environment.SphereMapRow0IsNegativeY = True;
+
+    EXPECT_EQ(pView->SetEnvironment(Environment), RADIENT_STATUS_OK);
+
+    const IRadientTextureAsset* pExpectedEnvironmentMap = pEnvironmentMap;
+    pEnvironmentMap.Release();
+
+    const RadientEnvironmentDesc& StoredEnvironment = pView->GetDesc().Environment;
+    ASSERT_NE(StoredEnvironment.pEnvironmentMap, nullptr);
+    EXPECT_EQ(StoredEnvironment.pEnvironmentMap, pExpectedEnvironmentMap);
+    EXPECT_STREQ(StoredEnvironment.pEnvironmentMap->GetReference().URI, "texture://environment");
+    EXPECT_EQ(StoredEnvironment.pEnvironmentMap->GetReference().Version, 7u);
+    EXPECT_EQ(StoredEnvironment.Color, Environment.Color);
+    EXPECT_EQ(StoredEnvironment.Intensity, Environment.Intensity);
+    EXPECT_EQ(StoredEnvironment.Exposure, Environment.Exposure);
+    EXPECT_EQ(StoredEnvironment.Yaw, Environment.Yaw);
+    EXPECT_EQ(StoredEnvironment.SphereMapRow0IsNegativeY, Environment.SphereMapRow0IsNegativeY);
+    EXPECT_EQ(pView->SetEnvironment(StoredEnvironment), RADIENT_STATUS_NO_CHANGE);
+
+    // Skybox settings are view-local and copy raw texture URI strings.
+    EXPECT_EQ(pView->GetDesc().Skybox.Yaw, 0.f);
+
+    std::string SkyboxURI = "texture://skybox";
+
+    RefCntAutoPtr<IRadientTextureAsset> pSkyboxTexture = MakeTestTextureAsset(SkyboxURI.c_str(), 3);
+
+    RadientSkyboxDesc Skybox{};
+    Skybox.Source                   = RADIENT_SKYBOX_SOURCE_TEXTURE;
+    Skybox.pTexture                 = pSkyboxTexture;
+    Skybox.Color                    = {0.25f, 0.5f, 1.f};
+    Skybox.Intensity                = 2.f;
+    Skybox.Exposure                 = -1.f;
+    Skybox.MipLevel                 = 1.f;
+    Skybox.Yaw                      = -PI_F * 0.25f;
+    Skybox.SphereMapRow0IsNegativeY = True;
+
+    EXPECT_EQ(pView->SetSkybox(Skybox), RADIENT_STATUS_OK);
+    SkyboxURI[0] = 'X';
+
+    const RadientSkyboxDesc& StoredSkybox = pView->GetDesc().Skybox;
+    EXPECT_EQ(StoredSkybox.Source, RADIENT_SKYBOX_SOURCE_TEXTURE);
+    ASSERT_NE(StoredSkybox.pTexture, nullptr);
+    EXPECT_STREQ(StoredSkybox.pTexture->GetReference().URI, "texture://skybox");
+    EXPECT_EQ(StoredSkybox.pTexture->GetReference().Version, 3u);
+    EXPECT_EQ(StoredSkybox.Color.x, 0.25f);
+    EXPECT_EQ(StoredSkybox.Color.y, 0.5f);
+    EXPECT_EQ(StoredSkybox.Color.z, 1.f);
+    EXPECT_EQ(StoredSkybox.Intensity, 2.f);
+    EXPECT_EQ(StoredSkybox.Exposure, -1.f);
+    EXPECT_EQ(StoredSkybox.MipLevel, 1.f);
+    EXPECT_EQ(StoredSkybox.Yaw, Skybox.Yaw);
+    EXPECT_EQ(StoredSkybox.SphereMapRow0IsNegativeY, True);
+
+    EXPECT_EQ(pView->SetSkybox(StoredSkybox), RADIENT_STATUS_NO_CHANGE);
+
+    // Presentation settings are stored by the view independently of the
+    // render technique that will consume them.
+    const RadientToneMappingDesc& DefaultToneMapping = pView->GetDesc().ToneMapping;
+    EXPECT_EQ(DefaultToneMapping.Mode, RADIENT_TONE_MAPPING_MODE_UNCHARTED2);
+    EXPECT_EQ(DefaultToneMapping.AutoExposure, False);
+    EXPECT_EQ(DefaultToneMapping.AverageLogLum, 0.3f);
+    EXPECT_EQ(DefaultToneMapping.MiddleGray, 0.18f);
+    EXPECT_EQ(DefaultToneMapping.LightAdaptation, False);
+    EXPECT_EQ(DefaultToneMapping.WhitePoint, 3.f);
+    EXPECT_EQ(DefaultToneMapping.LuminanceSaturation, 1.f);
+
+    RadientToneMappingDesc ToneMapping{};
+    ToneMapping.Mode            = RADIENT_TONE_MAPPING_MODE_AGX_CUSTOM;
+    ToneMapping.AutoExposure    = False;
+    ToneMapping.AverageLogLum   = 0.5f;
+    ToneMapping.MiddleGray      = 0.2f;
+    ToneMapping.LightAdaptation = False;
+    ToneMapping.WhitePoint      = 4.f;
+    ToneMapping.AgX.Saturation  = 1.2f;
+
+    EXPECT_EQ(pView->SetToneMapping(ToneMapping), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().ToneMapping, ToneMapping);
+    EXPECT_EQ(pView->SetToneMapping(ToneMapping), RADIENT_STATUS_NO_CHANGE);
+
+    const RadientBloomDesc& DefaultBloom = pView->GetDesc().Bloom;
+    EXPECT_EQ(DefaultBloom.Enabled, False);
+    EXPECT_EQ(DefaultBloom.Intensity, 0.15f);
+    EXPECT_EQ(DefaultBloom.Threshold, 1.f);
+    EXPECT_EQ(DefaultBloom.SoftThreshold, 0.125f);
+    EXPECT_EQ(DefaultBloom.Radius, 0.75f);
+
+    RadientBloomDesc Bloom{};
+    Bloom.Enabled       = True;
+    Bloom.Intensity     = 0.25f;
+    Bloom.Threshold     = 2.f;
+    Bloom.SoftThreshold = 0.25f;
+    Bloom.Radius        = 0.8f;
+
+    EXPECT_EQ(pView->SetBloom(Bloom), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().Bloom, Bloom);
+    EXPECT_EQ(pView->SetBloom(Bloom), RADIENT_STATUS_NO_CHANGE);
+
+    const RadientTemporalAntiAliasingDesc& DefaultTemporalAntiAliasing = pView->GetDesc().TemporalAntiAliasing;
+    EXPECT_EQ(DefaultTemporalAntiAliasing.Enabled, False);
+    EXPECT_EQ(DefaultTemporalAntiAliasing.TemporalStabilityFactor, 0.9375f);
+
+    RadientTemporalAntiAliasingDesc TemporalAntiAliasing{};
+    TemporalAntiAliasing.Enabled                 = True;
+    TemporalAntiAliasing.TemporalStabilityFactor = 0.9f;
+
+    EXPECT_EQ(pView->SetTemporalAntiAliasing(TemporalAntiAliasing), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().TemporalAntiAliasing, TemporalAntiAliasing);
+    EXPECT_EQ(pView->SetTemporalAntiAliasing(TemporalAntiAliasing), RADIENT_STATUS_NO_CHANGE);
+
+    const RadientSSAODesc& DefaultSSAO = pView->GetDesc().SSAO;
+    EXPECT_EQ(DefaultSSAO.Enabled, False);
+    EXPECT_EQ(DefaultSSAO.Algorithm, RADIENT_SSAO_ALGORITHM_GTAO);
+    EXPECT_EQ(DefaultSSAO.EffectRadius, 1.f);
+    EXPECT_EQ(DefaultSSAO.EffectFalloffRange, 0.615f);
+    EXPECT_EQ(DefaultSSAO.RadiusMultiplier, 1.457f);
+    EXPECT_EQ(DefaultSSAO.DepthMIPSamplingOffset, 3.3f);
+    EXPECT_EQ(DefaultSSAO.TemporalStabilityFactor, 0.9f);
+    EXPECT_EQ(DefaultSSAO.SpatialReconstructionRadius, 4.f);
+    EXPECT_EQ(DefaultSSAO.BitmaskThickness, 0.5f);
+
+    RadientSSAODesc SSAO{};
+    SSAO.Enabled                     = True;
+    SSAO.Algorithm                   = RADIENT_SSAO_ALGORITHM_VBAO;
+    SSAO.EffectRadius                = 2.f;
+    SSAO.EffectFalloffRange          = 0.5f;
+    SSAO.RadiusMultiplier            = 1.2f;
+    SSAO.DepthMIPSamplingOffset      = 2.5f;
+    SSAO.TemporalStabilityFactor     = 0.8f;
+    SSAO.SpatialReconstructionRadius = 5.f;
+    SSAO.BitmaskThickness            = 0.75f;
+
+    EXPECT_EQ(pView->SetSSAO(SSAO), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().SSAO, SSAO);
+    EXPECT_EQ(pView->SetSSAO(SSAO), RADIENT_STATUS_NO_CHANGE);
+
+    const RadientSSRDesc& DefaultSSR = pView->GetDesc().SSR;
+    EXPECT_EQ(DefaultSSR.Enabled, False);
+    EXPECT_EQ(DefaultSSR.DepthBufferThickness, 0.025f);
+    EXPECT_EQ(DefaultSSR.RoughnessThreshold, 0.2f);
+    EXPECT_EQ(DefaultSSR.MostDetailedMip, 0u);
+    EXPECT_EQ(DefaultSSR.MaxTraversalIntersections, 128u);
+    EXPECT_EQ(DefaultSSR.GGXImportanceSampleBias, 0.3f);
+    EXPECT_EQ(DefaultSSR.SpatialReconstructionRadius, 4.f);
+    EXPECT_EQ(DefaultSSR.TemporalRadianceStabilityFactor, 1.f);
+    EXPECT_EQ(DefaultSSR.TemporalVarianceStabilityFactor, 0.9f);
+    EXPECT_EQ(DefaultSSR.BilateralCleanupSpatialSigmaFactor, 0.9f);
+
+    RadientSSRDesc SSR{};
+    SSR.Enabled                            = True;
+    SSR.DepthBufferThickness               = 0.05f;
+    SSR.RoughnessThreshold                 = 0.4f;
+    SSR.MostDetailedMip                    = 1;
+    SSR.MaxTraversalIntersections          = 64;
+    SSR.GGXImportanceSampleBias            = 0.2f;
+    SSR.SpatialReconstructionRadius        = 5.f;
+    SSR.TemporalRadianceStabilityFactor    = 0.8f;
+    SSR.TemporalVarianceStabilityFactor    = 0.7f;
+    SSR.BilateralCleanupSpatialSigmaFactor = 1.2f;
+
+    EXPECT_EQ(pView->SetSSR(SSR), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().SSR, SSR);
+    EXPECT_EQ(pView->SetSSR(SSR), RADIENT_STATUS_NO_CHANGE);
+
+    const RadientDepthOfFieldDesc& DefaultDepthOfField = pView->GetDesc().DepthOfField;
+    EXPECT_EQ(DefaultDepthOfField.Enabled, False);
+    EXPECT_EQ(DefaultDepthOfField.MaxCircleOfConfusion, 0.01f);
+    EXPECT_EQ(DefaultDepthOfField.TemporalStabilityFactor, 0.9375f);
+    EXPECT_EQ(DefaultDepthOfField.BokehKernelRingCount, 5u);
+    EXPECT_EQ(DefaultDepthOfField.BokehKernelRingDensity, 7u);
+    EXPECT_EQ(DefaultDepthOfField.TemporalSmoothing, True);
+    EXPECT_EQ(DefaultDepthOfField.KarisInverse, True);
+
+    RadientDepthOfFieldDesc DepthOfField{};
+    DepthOfField.Enabled                 = True;
+    DepthOfField.MaxCircleOfConfusion    = 0.015f;
+    DepthOfField.TemporalStabilityFactor = 0.8f;
+    DepthOfField.BokehKernelRingCount    = 4;
+    DepthOfField.BokehKernelRingDensity  = 6;
+    DepthOfField.TemporalSmoothing       = False;
+    DepthOfField.KarisInverse            = False;
+
+    EXPECT_EQ(pView->SetDepthOfField(DepthOfField), RADIENT_STATUS_OK);
+    EXPECT_EQ(pView->GetDesc().DepthOfField, DepthOfField);
+    EXPECT_EQ(pView->SetDepthOfField(DepthOfField), RADIENT_STATUS_NO_CHANGE);
+}
+
+TEST(RadientRendererTest, RejectsInvalidDebugVisualization)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RadientViewDesc InvalidViewDesc{};
+    InvalidViewDesc.DebugVisualization = RADIENT_DEBUG_VISUALIZATION_COUNT;
+
+    RefCntAutoPtr<IRadientView> pView;
+    EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pView), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(pView, nullptr);
+
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    EXPECT_EQ(pView->SetDebugVisualization(RADIENT_DEBUG_VISUALIZATION_COUNT), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(pView->GetDesc().DebugVisualization, RADIENT_DEBUG_VISUALIZATION_NONE);
+}
+
+TEST(RadientRendererTest, RejectsInvalidClearColor)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientFloat4 StoredClearColor = pView->GetDesc().ClearColor;
+    const auto          ExpectInvalid    = [&](const RadientFloat4& ClearColor) {
+        EXPECT_EQ(pView->SetClearColor(ClearColor), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().ClearColor, StoredClearColor);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.ClearColor = ClearColor;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    RadientFloat4 Invalid = StoredClearColor;
+    Invalid.x             = NaN;
+    ExpectInvalid(Invalid);
+
+    Invalid   = StoredClearColor;
+    Invalid.y = Infinity;
+    ExpectInvalid(Invalid);
+
+    Invalid   = StoredClearColor;
+    Invalid.z = -Infinity;
+    ExpectInvalid(Invalid);
+
+    Invalid   = StoredClearColor;
+    Invalid.w = NaN;
+    ExpectInvalid(Invalid);
+}
+
+TEST(RadientRendererTest, RejectsInvalidViewEnvironment)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RadientViewDesc InvalidViewDesc{};
+    InvalidViewDesc.Environment.Intensity = -1.f;
+
+    RefCntAutoPtr<IRadientView> pView;
+    EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pView), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(pView, nullptr);
+
+    RadientViewDesc ViewDesc{};
+    ASSERT_EQ(pRenderer->CreateView(ViewDesc, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientEnvironmentDesc StoredEnvironment        = pView->GetDesc().Environment;
+    const auto                   ExpectInvalidEnvironment = [&](RadientEnvironmentDesc Environment) {
+        EXPECT_EQ(pView->SetEnvironment(Environment), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().Environment, StoredEnvironment);
+    };
+
+    RadientEnvironmentDesc InvalidEnvironment = StoredEnvironment;
+    InvalidEnvironment.Color.x                = -0.1f;
+    ExpectInvalidEnvironment(InvalidEnvironment);
+
+    InvalidEnvironment         = StoredEnvironment;
+    InvalidEnvironment.Color.y = std::numeric_limits<Float32>::infinity();
+    ExpectInvalidEnvironment(InvalidEnvironment);
+
+    InvalidEnvironment           = StoredEnvironment;
+    InvalidEnvironment.Intensity = -1.f;
+    ExpectInvalidEnvironment(InvalidEnvironment);
+
+    InvalidEnvironment           = StoredEnvironment;
+    InvalidEnvironment.Intensity = std::numeric_limits<Float32>::infinity();
+    ExpectInvalidEnvironment(InvalidEnvironment);
+
+    InvalidEnvironment          = StoredEnvironment;
+    InvalidEnvironment.Exposure = std::numeric_limits<Float32>::quiet_NaN();
+    ExpectInvalidEnvironment(InvalidEnvironment);
+
+    InvalidEnvironment     = StoredEnvironment;
+    InvalidEnvironment.Yaw = std::numeric_limits<Float32>::quiet_NaN();
+    ExpectInvalidEnvironment(InvalidEnvironment);
+}
+
+TEST(RadientRendererTest, RejectsInvalidToneMappingSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientToneMappingDesc StoredToneMapping = pView->GetDesc().ToneMapping;
+    const auto                   ExpectInvalid     = [&](const RadientToneMappingDesc& ToneMapping) {
+        EXPECT_EQ(pView->SetToneMapping(ToneMapping), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().ToneMapping, StoredToneMapping);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.ToneMapping = ToneMapping;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    RadientToneMappingDesc Invalid = StoredToneMapping;
+    Invalid.Mode                   = RADIENT_TONE_MAPPING_MODE_COUNT;
+    ExpectInvalid(Invalid);
+
+    const Float32 InvalidPositiveValues[] = {0.f, -0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidPositiveValues)
+    {
+        Invalid               = StoredToneMapping;
+        Invalid.AverageLogLum = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid            = StoredToneMapping;
+        Invalid.MiddleGray = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid            = StoredToneMapping;
+        Invalid.WhitePoint = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidNonNegativeValues[] = {-0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidNonNegativeValues)
+    {
+        Invalid                     = StoredToneMapping;
+        Invalid.LuminanceSaturation = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                = StoredToneMapping;
+        Invalid.AgX.Saturation = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid           = StoredToneMapping;
+        Invalid.AgX.Slope = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid           = StoredToneMapping;
+        Invalid.AgX.Power = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidFiniteValues[] = {NaN, Infinity, -Infinity};
+    for (Float32 Value : InvalidFiniteValues)
+    {
+        Invalid            = StoredToneMapping;
+        Invalid.AgX.Offset = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RejectsInvalidBloomSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientBloomDesc StoredBloom   = pView->GetDesc().Bloom;
+    const auto             ExpectInvalid = [&](const RadientBloomDesc& Bloom) {
+        EXPECT_EQ(pView->SetBloom(Bloom), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().Bloom, StoredBloom);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.Bloom = Bloom;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    RadientBloomDesc Invalid                    = StoredBloom;
+    const Float32    InvalidNonNegativeValues[] = {-0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidNonNegativeValues)
+    {
+        Invalid           = StoredBloom;
+        Invalid.Intensity = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid           = StoredBloom;
+        Invalid.Threshold = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidUnitValues[] = {-0.1f, 1.1f, NaN, Infinity};
+    for (Float32 Value : InvalidUnitValues)
+    {
+        Invalid               = StoredBloom;
+        Invalid.SoftThreshold = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid        = StoredBloom;
+        Invalid.Radius = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RejectsInvalidTemporalAntiAliasingSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientTemporalAntiAliasingDesc StoredTemporalAntiAliasing = pView->GetDesc().TemporalAntiAliasing;
+    const auto                            ExpectInvalid              = [&](const RadientTemporalAntiAliasingDesc& TemporalAntiAliasing) {
+        EXPECT_EQ(pView->SetTemporalAntiAliasing(TemporalAntiAliasing), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().TemporalAntiAliasing, StoredTemporalAntiAliasing);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.TemporalAntiAliasing = TemporalAntiAliasing;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    const Float32 InvalidUnitValues[] = {-0.1f, 1.1f, NaN, Infinity};
+    for (Float32 Value : InvalidUnitValues)
+    {
+        RadientTemporalAntiAliasingDesc Invalid = StoredTemporalAntiAliasing;
+        Invalid.TemporalStabilityFactor         = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RejectsInvalidSSAOSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientSSAODesc StoredSSAO    = pView->GetDesc().SSAO;
+    const auto            ExpectInvalid = [&](const RadientSSAODesc& SSAO) {
+        EXPECT_EQ(pView->SetSSAO(SSAO), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().SSAO, StoredSSAO);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.SSAO = SSAO;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    RadientSSAODesc Invalid = StoredSSAO;
+    Invalid.Algorithm       = RADIENT_SSAO_ALGORITHM_COUNT;
+    ExpectInvalid(Invalid);
+
+    const Float32 InvalidNonNegativeValues[] = {-0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidNonNegativeValues)
+    {
+        Invalid              = StoredSSAO;
+        Invalid.EffectRadius = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                        = StoredSSAO;
+        Invalid.DepthMIPSamplingOffset = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                             = StoredSSAO;
+        Invalid.SpatialReconstructionRadius = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                  = StoredSSAO;
+        Invalid.BitmaskThickness = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidUnitValues[] = {-0.1f, 1.1f, NaN, Infinity};
+    for (Float32 Value : InvalidUnitValues)
+    {
+        Invalid                    = StoredSSAO;
+        Invalid.EffectFalloffRange = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                         = StoredSSAO;
+        Invalid.TemporalStabilityFactor = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidPositiveValues[] = {0.f, -0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidPositiveValues)
+    {
+        Invalid                  = StoredSSAO;
+        Invalid.RadiusMultiplier = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RejectsInvalidSSRSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientSSRDesc StoredSSR     = pView->GetDesc().SSR;
+    const auto           ExpectInvalid = [&](const RadientSSRDesc& SSR) {
+        EXPECT_EQ(pView->SetSSR(SSR), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().SSR, StoredSSR);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.SSR = SSR;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    RadientSSRDesc Invalid  = StoredSSR;
+    Invalid.MostDetailedMip = 7;
+    ExpectInvalid(Invalid);
+
+    Invalid                           = StoredSSR;
+    Invalid.MaxTraversalIntersections = 0;
+    ExpectInvalid(Invalid);
+
+    const Float32 InvalidUnitValues[] = {-0.1f, 1.1f, NaN, Infinity};
+    for (Float32 Value : InvalidUnitValues)
+    {
+        Invalid                      = StoredSSR;
+        Invalid.DepthBufferThickness = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                    = StoredSSR;
+        Invalid.RoughnessThreshold = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                         = StoredSSR;
+        Invalid.GGXImportanceSampleBias = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                                 = StoredSSR;
+        Invalid.TemporalRadianceStabilityFactor = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                                 = StoredSSR;
+        Invalid.TemporalVarianceStabilityFactor = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidNonNegativeValues[] = {-0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidNonNegativeValues)
+    {
+        Invalid                             = StoredSSR;
+        Invalid.SpatialReconstructionRadius = Value;
+        ExpectInvalid(Invalid);
+
+        Invalid                                    = StoredSSR;
+        Invalid.BilateralCleanupSpatialSigmaFactor = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RejectsInvalidDepthOfFieldSettings)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView;
+    ASSERT_EQ(pRenderer->CreateView({}, &pView), RADIENT_STATUS_OK);
+    ASSERT_NE(pView, nullptr);
+
+    const RadientDepthOfFieldDesc StoredDepthOfField = pView->GetDesc().DepthOfField;
+    const auto                    ExpectInvalid      = [&](const RadientDepthOfFieldDesc& DepthOfField) {
+        EXPECT_EQ(pView->SetDepthOfField(DepthOfField), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pView->GetDesc().DepthOfField, StoredDepthOfField);
+
+        RadientViewDesc InvalidViewDesc{};
+        InvalidViewDesc.DepthOfField = DepthOfField;
+
+        RefCntAutoPtr<IRadientView> pInvalidView;
+        EXPECT_EQ(pRenderer->CreateView(InvalidViewDesc, &pInvalidView), RADIENT_STATUS_INVALID_ARGUMENT);
+        EXPECT_EQ(pInvalidView, nullptr);
+    };
+
+    const Float32 NaN      = std::numeric_limits<Float32>::quiet_NaN();
+    const Float32 Infinity = std::numeric_limits<Float32>::infinity();
+
+    const Float32 InvalidPositiveValues[] = {0.f, -0.1f, NaN, Infinity};
+    for (Float32 Value : InvalidPositiveValues)
+    {
+        RadientDepthOfFieldDesc Invalid = StoredDepthOfField;
+        Invalid.MaxCircleOfConfusion    = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Float32 InvalidUnitValues[] = {-0.1f, 1.1f, NaN, Infinity};
+    for (Float32 Value : InvalidUnitValues)
+    {
+        RadientDepthOfFieldDesc Invalid = StoredDepthOfField;
+        Invalid.TemporalStabilityFactor = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Uint32 InvalidRingCounts[] = {0, 1, 6};
+    for (Uint32 Value : InvalidRingCounts)
+    {
+        RadientDepthOfFieldDesc Invalid = StoredDepthOfField;
+        Invalid.BokehKernelRingCount    = Value;
+        ExpectInvalid(Invalid);
+    }
+
+    const Uint32 InvalidRingDensities[] = {0, 1, 8};
+    for (Uint32 Value : InvalidRingDensities)
+    {
+        RadientDepthOfFieldDesc Invalid = StoredDepthOfField;
+        Invalid.BokehKernelRingDensity  = Value;
+        ExpectInvalid(Invalid);
+    }
+}
+
+TEST(RadientRendererTest, RenderHeadlessScene)
+{
+    // Builds a minimal material, mesh, scene, renderer, and target to verify
+    // the headless render path can execute without a swap chain.
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientAssetManager> pAssetManager = GetTestAssetManager(*pEngine);
+    ASSERT_NE(pAssetManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateTestMaterial(*pAssetManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    RefCntAutoPtr<IRadientMeshAsset> pMesh = CreateTestMesh(*pAssetManager, pMaterial);
+    ASSERT_NE(pMesh, nullptr);
+
+    RefCntAutoPtr<IRadientScene> pScene = CreateTestScene(*pEngine);
+    ASSERT_NE(pScene, nullptr);
+
+    RefCntAutoPtr<IRadientSceneWriter> pWriter = CreateTestSceneWriter(*pEngine, pScene);
+    ASSERT_NE(pWriter, nullptr);
+
+    const RadientEntityID Entity = CreateTestRenderableEntity(*pWriter, pMesh, pMaterial);
+    ASSERT_NE(Entity, InvalidRadientEntityID);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RefCntAutoPtr<IRadientRenderTarget> pTarget = CreateTestRenderTarget(*pRenderer);
+    ASSERT_NE(pTarget, nullptr);
+
+    RefCntAutoPtr<IRadientView> pView = CreateTestView(*pRenderer, pScene, pTarget);
+    ASSERT_NE(pView, nullptr);
+
+    RefCntAutoPtr<IRadientView> pSecondView = CreateTestView(*pRenderer, pScene, pTarget);
+    ASSERT_NE(pSecondView, nullptr);
+
+    RadientRenderAttribs RenderAttribs{};
+    RenderAttribs.pView = pView;
+
+    // The test only checks successful submission; image correctness belongs to
+    // renderer-specific tests.
+    RadientFrameAttribs FrameAttribs{};
+    EXPECT_EQ(pRenderer->BeginFrame(FrameAttribs), RADIENT_STATUS_OK);
+    EXPECT_EQ(pRenderer->Render(RenderAttribs), RADIENT_STATUS_OK);
+    RenderAttribs.pView = pSecondView;
+    EXPECT_EQ(pRenderer->Render(RenderAttribs), RADIENT_STATUS_OK);
+    EXPECT_EQ(pRenderer->EndFrame(), RADIENT_STATUS_OK);
+}
+
+TEST(RadientRendererTest, EnforcesFrameLifecycle)
+{
+    RefCntAutoPtr<IRadientEngine> pEngine = CreateTestEngine();
+    ASSERT_NE(pEngine, nullptr);
+
+    RefCntAutoPtr<IRadientRenderer> pRenderer = CreateTestRenderer(*pEngine);
+    ASSERT_NE(pRenderer, nullptr);
+
+    RadientFrameAttribs  FrameAttribs{};
+    RadientRenderAttribs RenderAttribs{};
+
+    {
+        TestingEnvironment::ErrorScope ExpectedError{"outside an active renderer frame"};
+        EXPECT_EQ(pRenderer->Render(RenderAttribs), RADIENT_STATUS_INVALID_OPERATION);
+    }
+    {
+        TestingEnvironment::ErrorScope ExpectedError{"because no frame is active"};
+        EXPECT_EQ(pRenderer->EndFrame(), RADIENT_STATUS_INVALID_OPERATION);
+    }
+
+    EXPECT_EQ(pRenderer->BeginFrame(FrameAttribs), RADIENT_STATUS_OK);
+    {
+        TestingEnvironment::ErrorScope ExpectedError{"because another frame is already active"};
+        EXPECT_EQ(pRenderer->BeginFrame(FrameAttribs), RADIENT_STATUS_INVALID_OPERATION);
+    }
+    EXPECT_EQ(pRenderer->EndFrame(), RADIENT_STATUS_OK);
+    {
+        TestingEnvironment::ErrorScope ExpectedError{"because no frame is active"};
+        EXPECT_EQ(pRenderer->EndFrame(), RADIENT_STATUS_INVALID_OPERATION);
+    }
+}
+
+} // namespace

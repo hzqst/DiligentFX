@@ -1,0 +1,221 @@
+cmake_minimum_required (VERSION 3.13)
+
+project(Radient CXX)
+
+set(SOURCE
+    src/Animation/RadientAnimationBindingImpl.cpp
+    src/Animation/RadientAnimationRegistryImpl.cpp
+    src/Animation/RadientMaterialAnimationDestinationBinding.cpp
+    src/Animation/RadientMorphTargetWeightsImpl.cpp
+    src/Animation/RadientSceneAnimationDestinationBindingImpl.cpp
+    src/Animation/RadientSceneAnimationDestinationImpl.cpp
+    src/Animation/RadientSceneAnimationProperties.cpp
+    src/Animation/RadientSkeletonPoseImpl.cpp
+    src/Assets/RadientAnimationClipAsset.cpp
+    src/Assets/RadientAssetManagerImpl.cpp
+    src/Assets/RadientAssetResolver.cpp
+    src/Assets/RadientAssetValidation.cpp
+    src/Assets/RadientCacheKeyBuilder.cpp
+    src/Assets/RadientFilesystemAssetResolver.cpp
+    src/Assets/RadientGLTFLoader.cpp
+    src/Assets/RadientMaterialAssetManager.cpp
+    src/Assets/RadientMaterialChanges.cpp
+    src/Assets/RadientMaterialChanges.hpp
+    src/Assets/RadientMaterialDefinitionImpl.cpp
+    src/Assets/RadientMaterialAssetImpl.cpp
+    src/Assets/RadientMaterialAssetImplBase.hpp
+    src/Assets/RadientMeshIndexSource.cpp
+    src/Assets/RadientMeshAssetManager.cpp
+    src/Assets/RadientMorphTargetSource.cpp
+    src/Assets/RadientMorphTargets.cpp
+    src/Assets/RadientMeshPrimitives.cpp
+    src/Assets/RadientMeshVertexSource.cpp
+    src/Assets/RadientMeshViewCreateInfoSnapshot.hpp
+    src/Assets/RadientMeshViewSource.cpp
+    src/Assets/RadientSkinning.cpp
+    src/Assets/RadientStandardMaterial.cpp
+    src/Assets/RadientSurfaceMaterialAssetImpl.cpp
+    src/Assets/RadientTextureAssetManager.cpp
+    src/Assets/RadientTextureSource.cpp
+    src/Assets/RadientVertexLayout.cpp
+    src/Core/RadientDataBlob.cpp
+    src/Core/RadientBackendImpl.cpp
+    src/Core/RadientEngineImpl.cpp
+    src/Core/RadientViewImpl.cpp
+    src/Import/RadientGLTFConverter.cpp
+    src/Import/RadientGLTFSceneAssetImporter.cpp
+    src/Import/RadientOBJSceneAssetImporter.cpp
+    src/Import/RadientGLTFMaterialConverter.cpp
+    src/Import/RadientSceneImporterImpl.cpp
+    src/Import/RadientSceneInstantiation.cpp
+    src/Math/RadientMath.cpp
+    src/Render/RadientDrawList.cpp
+    src/Render/RadientFrameSRBCache.cpp
+    src/Render/RadientFrameRenderTargets.cpp
+    src/Render/RadientLightList.cpp
+    src/Render/RadientMaterialSRBTable.cpp
+    src/Render/RadientPBRRenderer.cpp
+    src/Render/RadientPostFXParameters.cpp
+    src/Render/RadientRenderPipeline.cpp
+    src/Render/RadientRendererImpl.cpp
+    src/Render/Tessera/Passes/RadientTesseraGeometryPass.cpp
+    src/Render/Tessera/Passes/RadientTesseraPostProcessPipeline.cpp
+    src/Render/Tessera/Passes/RadientTesseraSkyboxPass.cpp
+    src/Render/Tessera/RadientTesseraDrawableCache.cpp
+    src/Render/Tessera/RadientTesseraFrameHistory.cpp
+    src/Render/Tessera/RadientTesseraGeometryRenderer.cpp
+    src/Render/Tessera/RadientTesseraBufferSuballocator.cpp
+    src/Render/Tessera/RadientTesseraMaterialCache.cpp
+    src/Render/Tessera/RadientTesseraMorphData.cpp
+    src/Render/Tessera/RadientTesseraRenderTechnique.cpp
+    src/Render/Tessera/RadientTesseraSkinData.cpp
+    src/Scene/Components/RadientMaterialBindingsStorage.cpp
+    src/Scene/Components/RadientMeshComponentStorage.cpp
+    src/Scene/Components/RadientMorphComponentStorage.cpp
+    src/Scene/Components/RadientSkinComponentStorage.cpp
+    src/Scene/RadientSceneImpl.cpp
+    src/Scene/RadientSceneState.cpp
+    src/Scene/RadientSceneWriterImpl.cpp
+)
+
+set(INCLUDE
+    include/Animation/RadientAnimationBindingImpl.hpp
+    include/Animation/RadientMaterialAnimationDestinationBinding.hpp
+    include/Animation/RadientNodeAnimationProperty.hpp
+    include/Animation/RadientAnimationRegistryImpl.hpp
+    include/Animation/RadientSceneAnimationDestinationBindingImpl.hpp
+    include/Animation/RadientSceneAnimationDestinationImpl.hpp
+    include/Animation/RadientSkeletonPoseImpl.hpp
+    include/Animation/RadientAnimationValueType.hpp
+    include/Assets/RadientAssetImpl.hpp
+    include/Assets/RadientAssetCache.hpp
+    include/Assets/RadientAssetManagerImpl.hpp
+    include/Assets/RadientAssetResolver.hpp
+    include/Assets/RadientAssetURI.hpp
+    include/Assets/RadientAssetValidation.hpp
+    include/Assets/RadientCacheKeyBuilder.hpp
+    include/Assets/RadientFilesystemAssetResolver.hpp
+    include/Assets/RadientGLTFLoader.hpp
+    include/Assets/RadientMaterialAssetFactory.hpp
+    include/Assets/RadientMaterialAssetManager.hpp
+    include/Assets/RadientMaterialChangeTracker.hpp
+    include/Assets/RadientMaterialDefinitionImpl.hpp
+    include/Assets/RadientMaterialStorage.hpp
+    include/Assets/RadientMeshIndexSource.hpp
+    include/Assets/RadientMeshAssetManager.hpp
+    include/Assets/RadientMorphTargetData.hpp
+    include/Assets/RadientMorphTargetSource.hpp
+    include/Assets/RadientMeshVertexSource.hpp
+    include/Assets/RadientMeshViewSource.hpp
+    include/Assets/RadientTextureAssetManager.hpp
+    include/Assets/RadientTextureFormat.hpp
+    include/Assets/RadientTextureSource.hpp
+    include/Assets/RadientVertexLayout.hpp
+    include/Core/RadientBackendImpl.hpp
+    include/Core/RadientDataBlobReadAccess.hpp
+    include/Core/RadientEngineImpl.hpp
+    include/Core/RadientValidation.hpp
+    include/Core/RadientViewImpl.hpp
+    include/Import/RadientGLTFConverter.hpp
+    include/Import/RadientGLTFSceneAssetImporter.hpp
+    include/Import/RadientOBJSceneAssetImporter.hpp
+    include/Import/RadientSceneInstantiation.hpp
+    include/Import/RadientSceneImporterImpl.hpp
+    include/Math/RadientMath.hpp
+    include/Render/RadientDrawableMesh.hpp
+    include/Render/RadientDrawList.hpp
+    include/Render/RadientFrameSRBCache.hpp
+    include/Render/RadientFrameRenderTargets.hpp
+    include/Render/RadientLightList.hpp
+    include/Render/RadientMaterialSRBTable.hpp
+    include/Render/RadientPBRRenderer.hpp
+    include/Render/RadientPostFXParameters.hpp
+    include/Render/RadientRenderPipeline.hpp
+    include/Render/RadientRenderTechnique.hpp
+    include/Render/RadientRendererImpl.hpp
+    include/Render/RadientVertexAttributes.hpp
+    include/Scene/Components/RadientMaterialBindingsStorage.hpp
+    include/Scene/Components/RadientMeshComponentStorage.hpp
+    include/Scene/Components/RadientSkinComponentStorage.hpp
+    include/Scene/RadientSceneImpl.hpp
+    include/Scene/RadientSceneState.hpp
+    include/Scene/RadientSceneWriterImpl.hpp
+    include/Render/Tessera/Passes/RadientTesseraGeometryPass.hpp
+    include/Render/Tessera/Passes/RadientTesseraPostProcessPipeline.hpp
+    include/Render/Tessera/Passes/RadientTesseraSkyboxPass.hpp
+    include/Render/Tessera/RadientTesseraDrawableCache.hpp
+    include/Render/Tessera/RadientTesseraFrameHistory.hpp
+    include/Render/Tessera/RadientTesseraGeometryRenderer.hpp
+    include/Render/Tessera/RadientTesseraBufferSuballocator.hpp
+    include/Render/Tessera/RadientTesseraMaterialCache.hpp
+    include/Render/Tessera/RadientTesseraMorphData.hpp
+    include/Render/Tessera/RadientTesseraRenderTechnique.hpp
+    include/Render/Tessera/RadientTesseraSkinData.hpp
+    include/Scene/Components/RadientMorphComponentStorage.hpp
+)
+
+set(INTERFACE
+    interface/Radient.h
+    interface/RadientDataBlob.h
+    interface/RadientAnimation.h
+    interface/RadientAssetResolver.h
+    interface/RadientAssets.h
+    interface/RadientMaterials.h
+    interface/RadientBackend.h
+    interface/RadientEngine.h
+    interface/RadientImportedDocument.hpp
+    interface/RadientMath.h
+    interface/RadientMeshImportServices.h
+    interface/RadientMeshPrimitives.h
+    interface/RadientMorphTargets.h
+    interface/RadientRenderer.h
+    interface/RadientScene.h
+    interface/RadientSceneAssetImporter.hpp
+    interface/RadientSceneImporter.h
+    interface/RadientSceneWriter.h
+    interface/RadientSkinning.h
+    interface/RadientStandardMaterialParameters.h
+    interface/RadientTypes.h
+    interface/RadientTypesX.hpp
+    interface/RadientVertexLayout.h
+    interface/RadientView.h
+)
+
+set(RADIENT_SOURCE ${SOURCE} ${INCLUDE} ${INTERFACE} readme.md)
+add_library(Radient STATIC ${RADIENT_SOURCE})
+
+set_common_target_properties(Radient)
+
+target_include_directories(Radient
+PUBLIC
+    interface
+PRIVATE
+    include
+)
+
+target_link_libraries(Radient
+PRIVATE
+    Diligent-BuildSettings 
+    Diligent-GraphicsEngine
+    Diligent-BasicPlatform
+    Diligent-GraphicsTools
+    Diligent-AssetLoader
+    Diligent-TextureLoader
+    Diligent-Common
+    DiligentFX
+    EnTT
+    absl::btree
+    absl::flat_hash_map
+    absl::inlined_vector
+)
+
+if (MSVC)
+    # Disable warning C4324: structure was padded due to alignment specifier
+    target_compile_options(Radient PRIVATE /wd4324)
+endif()
+
+set_target_properties(Radient PROPERTIES
+    FOLDER DiligentFX
+)
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${RADIENT_SOURCE})

@@ -1,0 +1,556 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "name": "AlphaBlendModeTest",
+      "model": "Models/AlphaBlendModeTest/glTF-Binary/AlphaBlendModeTest.glb",
+      "camera": {
+        "eye": [0.0, 1.1, 11.0],
+        "target": [0.0, 1.1, 0.0]
+      },
+      "debugVisualizations": [
+        "Transparency"
+      ],
+      "toneMapping": {
+        "averageLogLum": 0.5
+      }
+    },
+    {
+      "name": "AnimatedColorsCube",
+      "model": "Models/AnimatedColorsCube/glTF-Binary/AnimatedColorsCube.glb",
+      "camera": {
+        "eye": [0.0, 4.0, 13.0],
+        "target": [0.0, 1.5, 0.0]
+      },
+      "animation": {
+        "name": "Cube Animation",
+        "captures": [
+          {
+            "name": "LeftRed",
+            "time": 0.0
+          },
+          {
+            "name": "MiddleGreen",
+            "time": 1.0
+          },
+          {
+            "name": "RightBlue",
+            "time": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "AnisotropyDiscTest",
+      "model": "Models/AnisotropyDiscTest/glTF-Binary/AnisotropyDiscTest.glb",
+      "camera": {
+        "eye": [-0.5, 1.25, 8.0],
+        "target": [-0.5, 1.25, 0.0]
+      },
+      "debugVisualizations": [
+        "AnisotropyDirection",
+        "AnisotropyStrength"
+      ],
+      "directionalLight": false,
+      "toneMapping": {
+        "averageLogLum": 0.5
+      }
+    },
+    {
+      "name": "AnisotropyRotationTest",
+      "model": "Models/AnisotropyRotationTest/glTF-Binary/AnisotropyRotationTest.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 8.0],
+        "target": [0.0, 0.0, 0.0]
+      },
+      "directionalLight": false
+    },
+    {
+      "name": "AnisotropyStrengthTest",
+      "model": "Models/AnisotropyStrengthTest/glTF-Binary/AnisotropyStrengthTest.glb",
+      "camera": {
+        "eye": [-0.45, 2.7, 10.0],
+        "target": [-0.45, 2.7, 0.0]
+      },
+      "debugVisualizations": [
+        "AnisotropyStrength"
+      ],
+      "directionalLight": false,
+      "toneMapping": {
+        "averageLogLum": 0.5
+      }
+    },
+    {
+      "name": "BoxAnimated",
+      "model": "Models/BoxAnimated/glTF-Binary/BoxAnimated.glb",
+      "camera": {
+        "eye": [4.0, 2.0, 6.0],
+        "target": [0.0, 1.25, 0.0]
+      },
+      "animation": {
+        "name": "0",
+        "captures": [
+          {
+            "name": "Rising",
+            "time": 0.625
+          },
+          {
+            "name": "Flipping",
+            "time": 1.875
+          }
+        ]
+      }
+    },
+    {
+      "name": "BoxInterleaved",
+      "model": "Models/BoxInterleaved/glTF-Binary/BoxInterleaved.glb",
+      "camera": {
+        "eye": [2.0, 2.0, 2.0]
+      }
+    },
+    {
+      "name": "BoxTexturedNonPowerOfTwo",
+      "model": "Models/BoxTexturedNonPowerOfTwo/glTF-Binary/BoxTexturedNonPowerOfTwo.glb",
+      "camera": {
+        "eye": [2.0, 2.0, 2.0]
+      }
+    },
+    {
+      "name": "BoxVertexColors",
+      "model": "Models/BoxVertexColors/glTF-Binary/BoxVertexColors.glb",
+      "camera": {
+        "eye": [2.5, 2.5, 2.5],
+        "target": [0.5, 0.5, 0.5]
+      }
+    },
+    {
+      "name": "ClearCoatTest",
+      "model": "Models/ClearCoatTest/glTF-Binary/ClearCoatTest.glb",
+      "camera": {
+        "eye": [-2.1, 0.3, 16.0],
+        "target": [-2.1, 0.3, 0.0]
+      },
+      "debugVisualizations": [
+        "ClearCoat",
+        "ClearCoatFactor",
+        "ClearCoatNormal",
+        "ClearCoatRoughness"
+      ]
+    },
+    {
+      "name": "CompareAmbientOcclusion",
+      "model": "Models/CompareAmbientOcclusion/glTF-Binary/CompareAmbientOcclusion.glb",
+      "camera": {
+        "eye": [0.0, 0.05, 0.9],
+        "target": [0.0, 0.05, 0.0]
+      },
+      "debugVisualizations": [
+        "Occlusion"
+      ],
+      "directionalLight": false
+    },
+    {
+      "name": "CompareAnisotropy",
+      "model": "Models/CompareAnisotropy/glTF-Binary/CompareAnisotropy.glb",
+      "camera": {
+        "eye": [0.0, 0.5, 3.0],
+        "target": [0.0, 0.5, 0.0]
+      },
+      "directionalLight": false
+    },
+    {
+      "name": "CompareBaseColor",
+      "model": "Models/CompareBaseColor/glTF-Binary/CompareBaseColor.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 4.0]
+      },
+      "debugVisualizations": [
+        "BaseColor"
+      ]
+    },
+    {
+      "name": "CompareClearcoat",
+      "model": "Models/CompareClearcoat/glTF-Binary/CompareClearcoat.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 4.0]
+      },
+      "debugVisualizations": [
+        "ClearCoat"
+      ]
+    },
+    {
+      "name": "CompareIridescence",
+      "model": "Models/CompareIridescence/glTF-Binary/CompareIridescence.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      }
+    },
+    {
+      "name": "CompareMetallic",
+      "model": "Models/CompareMetallic/glTF-Binary/CompareMetallic.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      },
+      "debugVisualizations": [
+        "Metallic"
+      ]
+    },
+    {
+      "name": "CompareNormal",
+      "model": "Models/CompareNormal/glTF-Binary/CompareNormal.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      },
+      "debugVisualizations": [
+        "ShadingNormal"
+      ]
+    },
+    {
+      "name": "CompareRoughness",
+      "model": "Models/CompareRoughness/glTF-Binary/CompareRoughness.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      },
+      "debugVisualizations": [
+        "Roughness"
+      ]
+    },
+    {
+      "name": "CompareSheen",
+      "model": "Models/CompareSheen/glTF-Binary/CompareSheen.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      },
+      "debugVisualizations": [
+        "Sheen"
+      ],
+      "directionalLight": false
+    },
+    {
+      "name": "CubeVisibility",
+      "model": "Models/CubeVisibility/glTF-Binary/CubeVisibility.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 6.0]
+      },
+      "animation": {
+        "name": "BlinkingBlueCube",
+        "captures": [
+          {
+            "name": "Visible",
+            "time": 0.25
+          },
+          {
+            "name": "Hidden",
+            "time": 0.75
+          }
+        ]
+      }
+    },
+    {
+      "name": "DamagedHelmet",
+      "model": "Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.0]
+      },
+      "debugVisualizations": [
+        "Emissive",
+        "DiffuseColor",
+        "SpecularColor",
+        "MeshNormal",
+        "ShadingNormal",
+        "NdotV",
+        "PunctualLighting",
+        "DiffuseIBL",
+        "SpecularIBL"
+      ]
+    },
+    {
+      "name": "DirectionalLightTest",
+      "model": "Models/DirectionalLight/glTF-Binary/DirectionalLight.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 2.0]
+      },
+      "debugVisualizations": [
+        "PunctualLighting"
+      ],
+      "directionalLight": false,
+      "enableIBL": false
+    },
+    {
+      "name": "EmissiveStrengthTest",
+      "model": "Models/EmissiveStrengthTest/glTF-Binary/EmissiveStrengthTest.glb",
+      "camera": {
+        "eye": [0.0, -1.0, 22.0],
+        "target": [0.0, -1.0, 0.0]
+      },
+      "debugVisualizations": [
+        "Emissive"
+      ]
+    },
+    {
+      "name": "EnvironmentTest",
+      "model": "Models/EnvironmentTest/glTF/EnvironmentTest.gltf",
+      "camera": {
+        "eye": [-0.56, 4.77, 27.0],
+        "target": [-0.56, 4.77, -1.1]
+      },
+      "directionalLight": false
+    },
+    {
+      "name": "Fox",
+      "model": "Models/Fox/glTF-Binary/Fox.glb",
+      "camera": {
+        "eye": [-220.0, 39.0, -10.0],
+        "target": [0.0, 39.0, -10.0]
+      },
+      "animation": {
+        "name": "Run",
+        "time": 0.5
+      }
+    },
+    {
+      "name": "IridescenceDielectricSpheres",
+      "model": "Models/IridescenceDielectricSpheres/glTF/IridescenceDielectricSpheres.gltf",
+      "camera": {
+        "eye": [0.0, 0.0, 50.0]
+      },
+      "debugVisualizations": [
+        "Iridescence"
+      ],
+      "toneMapping": {
+        "averageLogLum": 0.5
+      }
+    },
+    {
+      "name": "IridescenceMetallicSpheres",
+      "model": "Models/IridescenceMetallicSpheres/glTF/IridescenceMetallicSpheres.gltf",
+      "camera": {
+        "eye": [0.0, 0.0, 50.0]
+      },
+      "debugVisualizations": [
+        "Iridescence"
+      ]
+    },
+    {
+      "name": "LightVisibility",
+      "model": "Models/LightVisibility/glTF-Binary/LightVisibility.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 8.0]
+      },
+      "animation": {
+        "name": "BlinkingBlueLight",
+        "captures": [
+          {
+            "name": "Visible",
+            "time": 0.25
+          },
+          {
+            "name": "Hidden",
+            "time": 0.75
+          }
+        ]
+      },
+      "directionalLight": false,
+      "enableIBL": false
+    },
+    {
+      "name": "MetalRoughSpheres",
+      "model": "Models/MetalRoughSpheres/glTF-Binary/MetalRoughSpheres.glb",
+      "camera": {
+        "eye": [0.0, -0.3, 12.0],
+        "target": [0.0, -0.3, -1.6]
+      }
+    },
+    {
+      "name": "MetalRoughSpheresNoTextures",
+      "model": "Models/MetalRoughSpheresNoTextures/glTF-Binary/MetalRoughSpheresNoTextures.glb",
+      "camera": {
+        "eye": [0.003, 0.00275, 0.01],
+        "target": [0.003, 0.00275, 0.0],
+        "clippingRange": [0.001, 1.0]
+      }
+    },
+    {
+      "name": "MorphPrimitivesTest",
+      "model": "Models/MorphPrimitivesTest/glTF-Binary/MorphPrimitivesTest.glb",
+      "camera": {
+        "eye": [1.12, 1.0, -1.12],
+        "target": [0.0, 0.03, 0.0],
+        "fov": 40.0
+      }
+    },
+    {
+      "name": "MorphStressTestTheWave",
+      "model": "Models/MorphStressTest/glTF-Binary/MorphStressTest.glb",
+      "camera": {
+        "eye": [0.0, 0.7, 6.0],
+        "target": [0.0, 0.7, 0.0]
+      },
+      "animation": {
+        "name": "TheWave",
+        "time": 1.4
+      }
+    },
+    {
+      "name": "MultiUVTest",
+      "model": "Models/MultiUVTest/glTF-Binary/MultiUVTest.glb",
+      "camera": {
+        "eye": [3.0, 3.0, 3.0]
+      },
+      "debugVisualizations": [
+        "Texcoord0",
+        "Texcoord1"
+      ]
+    },
+    {
+      "name": "NormalTangentMirrorTest",
+      "model": "Models/NormalTangentMirrorTest/glTF-Binary/NormalTangentMirrorTest.glb",
+      "camera": {
+        "eye": [0.0, -0.075, 3.75],
+        "target": [0.0, -0.075, 0.0]
+      },
+      "debugVisualizations": [
+        "ShadingNormal"
+      ]
+    },
+    {
+      "name": "NormalTangentTest",
+      "model": "Models/NormalTangentTest/glTF-Binary/NormalTangentTest.glb",
+      "camera": {
+        "eye": [0.0, -0.125, 2.7],
+        "target": [0.0, -0.125, 0.0]
+      },
+      "debugVisualizations": [
+        "ShadingNormal"
+      ]
+    },
+    {
+      "name": "OrientationTest",
+      "model": "Models/OrientationTest/glTF-Binary/OrientationTest.glb",
+      "camera": {
+        "eye": [14.0, 14.0, 14.0]
+      }
+    },
+    {
+      "name": "PointLightIntensityTest",
+      "model": "Models/PointLightIntensityTest/glTF-Binary/PointLightIntensityTest.glb",
+      "camera": {
+        "eye": [0.0, -1.25, 9.0],
+        "target": [0.0, -1.25, 0.0]
+      },
+      "debugVisualizations": [
+        "PunctualLighting"
+      ],
+      "directionalLight": false,
+      "enableIBL": false
+    },
+    {
+      "name": "SheenTestGrid",
+      "model": "Models/SheenTestGrid/glTF-Binary/SheenTestGrid.glb",
+      "camera": {
+        "eye": [0.0, 0.055, 0.8],
+        "target": [0.0, 0.055, 0.0]
+      },
+      "debugVisualizations": [
+        "Sheen",
+        "SheenColor",
+        "SheenRoughness"
+      ],
+      "directionalLight": false
+    },
+    {
+      "name": "SpecGlossVsMetalRough",
+      "model": "Models/SpecGlossVsMetalRough/glTF-Binary/SpecGlossVsMetalRough.glb",
+      "camera": {
+        "eye": [0.0, 0.03, 0.55],
+        "target": [0.0, 0.03, 0.0]
+      },
+      "debugVisualizations": [
+        "DiffuseColor",
+        "SpecularColor",
+        "Roughness"
+      ]
+    },
+    {
+      "name": "SpecularSilkPouf",
+      "model": "Models/SpecularSilkPouf/glTF-Binary/SpecularSilkPouf.glb",
+      "camera": {
+        "eye": [0.0, 0.62, 0.82],
+        "target": [0.0, 0.1, 0.0]
+      }
+    },
+    {
+        "name": "SpecularTest",
+        "model": "Models/SpecularTest/glTF-Binary/SpecularTest.glb",
+        "camera": {
+          "eye": [-0.19, 0.0, 1.45],
+          "target": [-0.19, 0.0, 0.0]
+        },
+      "debugVisualizations": [
+        "SpecularFactor",
+        "SpecularColorFactor"
+      ],
+      "toneMapping": {
+        "averageLogLum": 0.2
+      }
+    },
+    {
+      "name": "TextureCoordinateTest",
+      "model": "Models/TextureCoordinateTest/glTF-Binary/TextureCoordinateTest.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 3.2]
+      }
+    },
+    {
+      "name": "TextureEncodingTest",
+      "model": "Models/TextureEncodingTest/glTF-Binary/TextureEncodingTest.glb",
+      "camera": {
+        "eye": [0.5, -0.5, 20.0],
+        "target": [0.5, -0.5, 0.0]
+      }
+    },
+    {
+      "name": "TextureLinearInterpolationTest",
+      "model": "Models/TextureLinearInterpolationTest/glTF-Binary/TextureLinearInterpolationTest.glb",
+      "camera": {
+        "eye": [0.0, 0.5, 7.0],
+        "target": [0.0, 0.5, 0.0]
+      }
+    },
+    {
+      "name": "TextureSettingsTest",
+      "model": "Models/TextureSettingsTest/glTF-Binary/TextureSettingsTest.glb",
+      "camera": {
+        "eye": [0.0, -0.6, 14.0],
+        "target": [0.0, -0.6, 0.0]
+      }
+    },
+    {
+      "name": "TextureTransformMultiTest",
+      "model": "Models/TextureTransformMultiTest/glTF-Binary/TextureTransformMultiTest.glb",
+      "camera": {
+        "eye": [0.0, -0.2, 3.5],
+        "target": [0.0, -0.2, 0.0]
+      },
+      "directionalLight": false
+    },
+    {
+      "name": "TextureTransformTest",
+      "model": "Models/TextureTransformTest/glTF/TextureTransformTest.gltf",
+      "camera": {
+        "eye": [0.0, 0.0, 4.5]
+      },
+      "directionalLight": false,
+      "toneMapping": {
+        "averageLogLum": 0.5
+      }
+    },
+    {
+      "name": "UnlitTest",
+      "model": "Models/UnlitTest/glTF-Binary/UnlitTest.glb",
+      "camera": {
+        "eye": [0.0, 0.0, 7.0]
+      }
+    }
+  ]
+}

@@ -1,0 +1,185 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "Assets/RadientMeshIndexSource.hpp"
+
+#include "Core/RadientValidation.hpp"
+
+#include "Align.hpp"
+#include "GraphicsAccessories.hpp"
+#include "XXH128Hasher.hpp"
+
+#include <cstring>
+#include <limits>
+
+namespace Diligent
+{
+
+namespace
+{
+
+constexpr Uint32 MeshIndexSourceCacheKeyVersion = 2;
+
+VALUE_TYPE GetSourceIndexType(RADIENT_INDEX_TYPE IndexType)
+{
+    switch (IndexType)
+    {
+        case RADIENT_INDEX_TYPE_UINT8:
+            return VT_UINT8;
+
+        case RADIENT_INDEX_TYPE_UINT16:
+            return VT_UINT16;
+
+        case RADIENT_INDEX_TYPE_UINT32:
+            return VT_UINT32;
+
+        default:
+            return VT_UNDEFINED;
+    }
+}
+
+void UpdateRawIfNotEmpty(XXH128State& Hasher, const void* pData, size_t Size)
+{
+    if (pData != nullptr && Size != 0)
+        Hasher.UpdateRaw(pData, static_cast<Uint64>(Size));
+}
+
+void UpdateStridedRaw(XXH128State& Hasher, const Uint8* pData, Uint32 Count, Uint32 ElementSize, Uint32 Stride)
+{
+    if (pData == nullptr || Count == 0 || ElementSize == 0)
+        return;
+
+    if (Stride == ElementSize)
+    {
+        UpdateRawIfNotEmpty(Hasher, pData, size_t{Count} * ElementSize);
+    }
+    else
+    {
+        for (Uint32 Elem = 0; Elem < Count; ++Elem)
+            Hasher.UpdateRaw(pData + size_t{Elem} * Stride, ElementSize);
+    }
+}
+
+} // namespace
+
+RadientMeshIndexSource::RadientMeshIndexSource(const RadientMeshIndexData& CI)
+{
+    const VALUE_TYPE IndexType = GetSourceIndexType(CI.IndexType);
+    if (CI.pIndexBuffer == nullptr || CI.IndexCount == 0 || IndexType == VT_UNDEFINED)
+    {
+        return;
+    }
+
+    // GPU copies require four-byte alignment, including the final partial word
+    // when a sixteen-bit index stream contains an odd number of indices.
+    const Uint32 PackedIndexSize = IndexType == VT_UINT32 ? sizeof(Uint32) : sizeof(Uint16);
+    if (AlignUp(Uint64{CI.IndexCount} * PackedIndexSize, Uint64{4}) > (std::numeric_limits<Uint32>::max)())
+        return;
+
+    RadientDataBlobReadAccess Buffer{CI.pIndexBuffer};
+    if (!Buffer)
+    {
+        m_Status = RADIENT_STATUS_INVALID_OPERATION;
+        return;
+    }
+
+    const Uint64 DataSize = Uint64{CI.IndexCount} * GetValueSize(IndexType);
+    if (!RadientValidation::IsAddressableSize(Buffer.GetSize()) || DataSize > Buffer.GetSize())
+        return;
+
+    if (Buffer.GetData() == nullptr)
+    {
+        m_Status = RADIENT_STATUS_INVALID_DATA;
+        return;
+    }
+
+    m_IndexCount   = CI.IndexCount;
+    m_SrcIndexType = IndexType;
+    m_pIndexData   = static_cast<const Uint8*>(Buffer.GetData());
+    m_IndexBuffer  = std::move(Buffer);
+    m_Status       = RADIENT_STATUS_OK;
+}
+
+Uint32 RadientMeshIndexSource::GetIndexDataSize() const
+{
+    return m_IndexCount * GetValueSize(GetIndexType());
+}
+
+std::string RadientMeshIndexSource::MakeCacheKey() const
+{
+    if (RADIENT_FAILED(m_Status))
+        return {};
+
+    const Uint32 IndexElementSize = GetValueSize(m_SrcIndexType);
+    if (IndexElementSize == 0 || m_pIndexData == nullptr)
+        return {};
+
+    XXH128State Hasher;
+    Hasher.Update(MeshIndexSourceCacheKeyVersion,
+                  m_IndexCount,
+                  m_SrcIndexType,
+                  Uint64{m_IndexCount} * IndexElementSize);
+    UpdateStridedRaw(Hasher, m_pIndexData, m_IndexCount, IndexElementSize, IndexElementSize);
+
+    return std::string{"mesh-index:"} + Hasher.Digest().ToString();
+}
+
+RADIENT_STATUS RadientMeshIndexSource::PackIndexData(PackDestination Destination) const noexcept
+{
+    if (RADIENT_FAILED(m_Status))
+        return m_Status;
+
+    if (Destination.pData == nullptr ||
+        Destination.DataSize < GetIndexDataSize())
+    {
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    }
+
+    Uint8* const pDstIndices = static_cast<Uint8*>(Destination.pData);
+    if (m_pIndexData == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    if (m_SrcIndexType == VT_UINT16 || m_SrcIndexType == VT_UINT32)
+    {
+        std::memcpy(pDstIndices, m_pIndexData, GetIndexDataSize());
+    }
+    else if (m_SrcIndexType == VT_UINT8)
+    {
+        for (Uint32 Index = 0; Index < m_IndexCount; ++Index)
+        {
+            const Uint16 Value = m_pIndexData[Index];
+            std::memcpy(pDstIndices + size_t{Index} * sizeof(Uint16), &Value, sizeof(Value));
+        }
+    }
+    else
+    {
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    }
+
+    return RADIENT_STATUS_OK;
+}
+
+} // namespace Diligent

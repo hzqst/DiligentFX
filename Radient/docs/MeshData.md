@@ -1,0 +1,161 @@
+# Mesh import services
+
+`IRadientMeshImportServices` provides importer implementations with independent
+vertex, index, and morph-target data creation. Its `CreateMeshView` method
+combines these handles into a mesh asset. This supports imported meshes that
+share vertices but use different indices or materials, and meshes containing
+multiple geometries.
+
+Include the C-compatible `RadientMeshImportServices.h` explicitly to use this
+interface. It is not included by `Radient.h`. Applications can create meshes
+through the regular `IRadientAssetManager::CreateMesh` method.
+
+The input descriptors `RadientMeshVertexData`, `RadientMeshIndexData`, and
+`RadientMeshMorphTargetData` are defined in `RadientAssets.h`. Regular mesh
+creation uses them as `RadientMeshCreateInfo::VertexData`, `IndexData`, and
+`MorphTargetData`. Morph targets use `VertexData.VertexCount`, so a complete
+mesh specifies its vertex count only once. The `IRadientMesh*Data` interfaces
+are the reusable asset handles returned by the import service.
+
+Scene importers receive the service in
+`RadientSceneAssetImportContext::pMeshImportServices` during `Import`. See
+[scene asset importers](SceneAssetImporters.md) for registration and importer
+selection. The examples below use that borrowed service:
+
+```cpp
+IRadientMeshImportServices* const pMeshImportServices = Context.pMeshImportServices;
+```
+
+Use it during the import call. A registered importer does not retain the
+service or its asset manager, which would create an ownership cycle.
+
+## Create geometry data
+
+Describe source vertices with the existing vertex-layout API and data blobs.
+The renderer chooses the stored layout. Index data accepts tightly packed
+`UINT8`, `UINT16`, or `UINT32` elements. Sixteen- and thirty-two-bit indices
+retain their width in GPU storage; eight-bit indices are widened to sixteen bits.
+
+```cpp
+RadientVertexLayoutDescX Layout;
+Layout.AddBuffer()
+      .AddAttribute("POSITION", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 3);
+
+IRadientDataBlob* VertexBuffers[] = {pPositionBlob};
+RadientMeshVertexData VertexData;
+VertexData.VertexLayout    = Layout;
+VertexData.ppVertexBuffers = VertexBuffers;
+VertexData.VertexCount     = VertexCount;
+
+RefCntAutoPtr<IRadientMeshVertexData> pVertexData;
+RADIENT_STATUS Status = pMeshImportServices->CreateMeshVertexData(VertexData, &pVertexData);
+if (RADIENT_FAILED(Status))
+    return Status;
+
+RadientMeshIndexData IndexData;
+IndexData.pIndexBuffer = pIndexBlob;
+IndexData.IndexCount   = IndexCount;
+IndexData.IndexType    = RADIENT_INDEX_TYPE_UINT16;
+
+RefCntAutoPtr<IRadientMeshIndexData> pIndexData;
+Status = pMeshImportServices->CreateMeshIndexData(IndexData, &pIndexData);
+if (RADIENT_FAILED(Status))
+    return Status;
+```
+
+Both calls copy descriptor metadata and acquire shared read access to their
+source blobs before returning. End any blob write scope before calling them.
+The caller can release its descriptors and blob references after the calls;
+Radient retains the blobs until source processing finishes. Reference-mode
+blobs still require their external storage to remain valid for the blob's
+lifetime.
+
+Optional `CreateMeshMorphTargetData` takes a `RadientMeshMorphTargetData`
+containing the target array and count, plus a separate vertex count. Each
+attribute supplies a `pDeltaBuffer` and `ByteOffset` identifying tightly packed
+`FLOAT32` deltas; several attributes can share one blob. The call copies names
+and attribute descriptions and retains the blobs under shared read access,
+following the same lifetime rules as vertex and index data. Attach the resulting
+handle to any geometry with the same vertex count.
+
+## Assemble a mesh view
+
+```cpp
+RadientMeshGeometryData Geometry;
+Geometry.pVertexData = pVertexData;
+Geometry.pIndexData  = pIndexData;
+
+RadientMeshPrimitiveCreateInfo Primitive;
+Primitive.Name         = "Surface";
+Primitive.FirstElement = 0;
+Primitive.ElementCount = IndexCount;
+Primitive.pMaterial    = pMaterial;
+
+RadientMeshViewCreateInfo ViewCI;
+ViewCI.pGeometryData  = &Geometry;
+ViewCI.GeometryCount  = 1;
+ViewCI.pPrimitives    = &Primitive;
+ViewCI.PrimitiveCount = 1;
+
+RefCntAutoPtr<IRadientMeshAsset> pMesh;
+Status = pMeshImportServices->CreateMeshView(ViewCI, &pMesh);
+if (RADIENT_FAILED(Status))
+    return Status;
+```
+
+The view may be submitted immediately after creating its data handles. It waits
+for their source processing and uses their existing storage. All geometry data
+must belong to the same asset manager as the mesh-import service. Vertex data
+is required. Leave `Geometry.pIndexData` null for non-indexed geometry; primitive
+`FirstElement` and `ElementCount` then select vertices directly. Indexed and
+non-indexed geometries may appear in the same mesh view.
+
+For multiple geometries, provide a `pGeometryData` array and use
+`pGeometryIndices` to map each primitive to an array entry. A null mapping
+selects geometry zero for every primitive. Geometry handles can be reused
+independently: two entries may share vertices and use different index data,
+or vice versa. Each primitive selects its own index or vertex range and material.
+Unused geometry entries are ignored; the resulting mesh description lists
+used geometries in first-use order.
+
+The call copies primitive metadata, names, and geometry mappings and retains
+the referenced materials and geometry data. Input arrays and caller-owned
+references can be released when it returns. Primitive ranges and compatibility
+of morph targets across geometries are checked after data processing finishes.
+
+## Create a non-indexed mesh
+
+For regular `CreateMesh`, leave `IndexData` at its default empty value and
+provide vertex ranges in the primitive descriptors:
+
+```cpp
+RadientMeshPrimitiveCreateInfo Primitive;
+Primitive.FirstElement = 0;
+Primitive.ElementCount = VertexCount;
+Primitive.pMaterial    = pMaterial;
+
+RadientMeshCreateInfo MeshCI;
+MeshCI.VertexData     = VertexData;
+MeshCI.pPrimitives    = &Primitive;
+MeshCI.PrimitiveCount = 1;
+```
+
+No index data is created or uploaded. Reflection reports `IndexType = NONE`
+and `IndexCount = 0`; primitive element ranges refer to the geometry's vertices.
+An empty index descriptor has a null blob, zero count, and type `NONE`. Partially
+specified index data is invalid. The import service's `CreateMeshIndexData`
+continues to require actual index data.
+
+## Completion and ownership
+
+Creation normally returns `RADIENT_STATUS_PENDING`. Data handles can be used
+to create mesh views while processing is pending. Query `GetRadientAssetLoadStatus`
+with a data handle or the assembled mesh to check progress without waiting.
+A mesh finishes loading after its data dependencies, and a dependency failure also
+fails the mesh. Successful source loading does not mean GPU uploads have completed;
+rendering uses the existing asset upload pipeline.
+
+Data handles are immutable. Keep a handle to reuse it in later views, or release
+it after creating the views that need it. Views retain their geometry data.
+Identical processed data uses the existing deduplication behavior, and unused
+data is released when no handles or views retain it.

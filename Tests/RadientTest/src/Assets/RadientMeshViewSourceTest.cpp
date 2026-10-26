@@ -1,0 +1,317 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "Assets/RadientMaterialAssetManager.hpp"
+#include "Assets/RadientMeshViewSource.hpp"
+#include "RadientMaterialTestHelpers.hpp"
+
+#include "gtest/gtest.h"
+
+#include <array>
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace Diligent;
+
+namespace
+{
+
+RadientMeshPrimitiveCreateInfo MakePrimitive(Uint32 FirstElement = 0,
+                                             Uint32 ElementCount = 3)
+{
+    RadientMeshPrimitiveCreateInfo Primitive{};
+    Primitive.FirstElement = FirstElement;
+    Primitive.ElementCount = ElementCount;
+    return Primitive;
+}
+
+RadientMeshViewCreateInfo MakeViewCI(const RadientMeshPrimitiveCreateInfo* pPrimitives,
+                                     Uint32                                PrimitiveCount,
+                                     const Uint32*                         pGeometryIndices = nullptr)
+{
+    RadientMeshViewCreateInfo ViewCI{};
+    ViewCI.pPrimitives      = pPrimitives;
+    ViewCI.PrimitiveCount   = PrimitiveCount;
+    ViewCI.pGeometryIndices = pGeometryIndices;
+    return ViewCI;
+}
+
+RADIENT_STATUS CreateViewStatus(const RadientMeshViewCreateInfo& ViewCI,
+                                Uint32                           ElementCount)
+{
+    return RadientMeshViewSource{ViewCI, ElementCount}.GetStatus();
+}
+
+RefCntAutoPtr<IRadientMaterialAsset> CreateMaterial(RadientMaterialAssetManager& MaterialManager)
+{
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial;
+    EXPECT_EQ(Testing::CreateStandardMaterialAsset(MaterialManager, {}, pMaterial.GetAddressOfEmpty()),
+              RADIENT_STATUS_OK);
+    EXPECT_NE(pMaterial, nullptr);
+    return pMaterial;
+}
+
+} // namespace
+
+TEST(RadientMeshViewSourceTest, RejectsInvalidCreateInfo)
+{
+    RadientMeshPrimitiveCreateInfo  Primitive = MakePrimitive();
+    const RadientMeshViewCreateInfo ValidView = MakeViewCI(&Primitive, 1);
+
+    EXPECT_EQ(CreateViewStatus(ValidView, 0), RADIENT_STATUS_INVALID_ARGUMENT);
+
+    EXPECT_EQ(CreateViewStatus(MakeViewCI(nullptr, 1), 3), RADIENT_STATUS_INVALID_ARGUMENT);
+    EXPECT_EQ(CreateViewStatus(MakeViewCI(&Primitive, 0), 3), RADIENT_STATUS_INVALID_ARGUMENT);
+
+    RadientMeshPrimitiveCreateInfo InvalidPrimitive = Primitive;
+    InvalidPrimitive.ElementCount                   = 0;
+    EXPECT_EQ(CreateViewStatus(MakeViewCI(&InvalidPrimitive, 1), 3), RADIENT_STATUS_INVALID_ARGUMENT);
+
+    InvalidPrimitive              = Primitive;
+    InvalidPrimitive.FirstElement = 3;
+    EXPECT_EQ(CreateViewStatus(MakeViewCI(&InvalidPrimitive, 1), 3), RADIENT_STATUS_INVALID_ARGUMENT);
+
+    InvalidPrimitive              = Primitive;
+    InvalidPrimitive.FirstElement = 2;
+    InvalidPrimitive.ElementCount = 2;
+    EXPECT_EQ(CreateViewStatus(MakeViewCI(&InvalidPrimitive, 1), 3), RADIENT_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(RadientMeshViewSourceTest, CopiesPrimitiveRangesAndKeepsMaterialsAlive)
+{
+    RadientMaterialAssetManagerSharedPtr pMaterialManager = RadientMaterialAssetManager::Create();
+    ASSERT_NE(pMaterialManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateMaterial(*pMaterialManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    std::string PrimitiveName{"mesh view primitive"};
+
+    RadientMeshPrimitiveCreateInfo Primitive = MakePrimitive(1, 2);
+    Primitive.Name                           = PrimitiveName.c_str();
+    Primitive.pMaterial                      = pMaterial;
+
+    RadientMeshViewSource View{MakeViewCI(&Primitive, 1), 3};
+    ASSERT_EQ(View.GetStatus(), RADIENT_STATUS_OK);
+
+    PrimitiveName[0]       = 'X';
+    Primitive.FirstElement = 0;
+    Primitive.ElementCount = 1;
+    Primitive.Name         = nullptr;
+    Primitive.pMaterial    = nullptr;
+    pMaterial.Release();
+
+    ASSERT_EQ(View.GetPrimitiveCount(), 1u);
+    EXPECT_EQ(View.GetPrimitive(0).FirstElement, 1u);
+    EXPECT_EQ(View.GetPrimitive(0).ElementCount, 2u);
+    EXPECT_EQ(View.GetGeometryIndex(0), 0u);
+    ASSERT_NE(View.GetPrimitive(0).Name, nullptr);
+    EXPECT_STREQ(View.GetPrimitive(0).Name, "mesh view primitive");
+    EXPECT_NE(View.GetPrimitive(0).Name, PrimitiveName.c_str());
+
+    IRadientMaterialAsset* pKeptMaterial = View.GetMaterial(0);
+    ASSERT_NE(pKeptMaterial, nullptr);
+    EXPECT_EQ(RadientMaterialAssetManager::GetLoadStatus(pKeptMaterial), RADIENT_STATUS_OK);
+}
+
+TEST(RadientMeshViewSourceTest, MoveConstructorRebindsPrimitiveNames)
+{
+    RadientMaterialAssetManagerSharedPtr pMaterialManager = RadientMaterialAssetManager::Create();
+    ASSERT_NE(pMaterialManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial = CreateMaterial(*pMaterialManager);
+    ASSERT_NE(pMaterial, nullptr);
+
+    std::string PrimitiveName{"mesh view moved primitive"};
+
+    RadientMeshPrimitiveCreateInfo Primitive = MakePrimitive(1, 2);
+    Primitive.Name                           = PrimitiveName.c_str();
+    Primitive.pMaterial                      = pMaterial;
+
+    RadientMeshViewSource View{MakeViewCI(&Primitive, 1), 3};
+    ASSERT_EQ(View.GetStatus(), RADIENT_STATUS_OK);
+
+    RadientMeshViewSource MovedView = std::move(View);
+
+    PrimitiveName[0]    = 'X';
+    Primitive.Name      = nullptr;
+    Primitive.pMaterial = nullptr;
+    pMaterial.Release();
+
+    ASSERT_EQ(MovedView.GetPrimitiveCount(), 1u);
+    EXPECT_EQ(MovedView.GetPrimitive(0).FirstElement, 1u);
+    EXPECT_EQ(MovedView.GetPrimitive(0).ElementCount, 2u);
+    EXPECT_EQ(MovedView.GetGeometryIndex(0), 0u);
+    ASSERT_NE(MovedView.GetPrimitive(0).Name, nullptr);
+    EXPECT_STREQ(MovedView.GetPrimitive(0).Name, "mesh view moved primitive");
+    EXPECT_NE(MovedView.GetPrimitive(0).Name, PrimitiveName.c_str());
+
+    IRadientMaterialAsset* pKeptMaterial = MovedView.GetMaterial(0);
+    ASSERT_NE(pKeptMaterial, nullptr);
+    EXPECT_EQ(RadientMaterialAssetManager::GetLoadStatus(pKeptMaterial), RADIENT_STATUS_OK);
+}
+
+TEST(RadientMeshViewSourceTest, CacheKeyIncludesPrimitiveRangesAndMaterials)
+{
+    static constexpr const char* GeometryCacheKey = "mesh-geometry:test";
+
+    RadientMaterialAssetManagerSharedPtr pMaterialManager = RadientMaterialAssetManager::Create();
+    ASSERT_NE(pMaterialManager, nullptr);
+
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial0 = CreateMaterial(*pMaterialManager);
+    RefCntAutoPtr<IRadientMaterialAsset> pMaterial1 = CreateMaterial(*pMaterialManager);
+    ASSERT_NE(pMaterial0, nullptr);
+    ASSERT_NE(pMaterial1, nullptr);
+
+    RadientMeshPrimitiveCreateInfo Primitive = MakePrimitive();
+    Primitive.pMaterial                      = pMaterial0;
+
+    RadientMeshPrimitiveCreateInfo SamePrimitive = MakePrimitive();
+    SamePrimitive.pMaterial                      = pMaterial0;
+
+    RadientMeshPrimitiveCreateInfo DifferentRange = MakePrimitive(1, 2);
+    DifferentRange.pMaterial                      = pMaterial0;
+
+    RadientMeshPrimitiveCreateInfo DifferentMaterial = MakePrimitive();
+    DifferentMaterial.pMaterial                      = pMaterial1;
+
+    RadientMeshViewSource View{MakeViewCI(&Primitive, 1), 3};
+    RadientMeshViewSource SameView{MakeViewCI(&SamePrimitive, 1), 3};
+    RadientMeshViewSource DifferentRangeView{MakeViewCI(&DifferentRange, 1), 3};
+    RadientMeshViewSource DifferentMaterialView{MakeViewCI(&DifferentMaterial, 1), 3};
+
+    const std::string CacheKey = View.MakeCacheKey(GeometryCacheKey);
+    ASSERT_FALSE(CacheKey.empty());
+
+    EXPECT_EQ(CacheKey, SameView.MakeCacheKey(GeometryCacheKey));
+    EXPECT_NE(CacheKey, DifferentRangeView.MakeCacheKey(GeometryCacheKey));
+    EXPECT_NE(CacheKey, DifferentMaterialView.MakeCacheKey(GeometryCacheKey));
+    EXPECT_NE(CacheKey, View.MakeCacheKey("mesh-geometry:other"));
+
+    EXPECT_TRUE(View.MakeCacheKey(nullptr).empty());
+    EXPECT_TRUE(View.MakeCacheKey("").empty());
+
+    RadientMeshViewSource InvalidView{MakeViewCI(nullptr, 1), 3};
+    EXPECT_TRUE(InvalidView.MakeCacheKey(GeometryCacheKey).empty());
+}
+
+TEST(RadientMeshViewSourceTest, CacheKeyIgnoresPrimitiveNames)
+{
+    auto Primitive  = MakePrimitive();
+    auto KeyForName = [&Primitive](const Char* Name) {
+        Primitive.Name = Name;
+        RadientMeshViewSource View{MakeViewCI(&Primitive, 1), 3};
+        return View.MakeCacheKey("mesh-geometry:test");
+    };
+
+    const auto UnnamedKey   = KeyForName(nullptr);
+    const auto EmptyNameKey = KeyForName("");
+    const auto NamedKey     = KeyForName("primitive");
+    ASSERT_FALSE(UnnamedKey.empty());
+    EXPECT_EQ(UnnamedKey, EmptyNameKey);
+    EXPECT_EQ(UnnamedKey, NamedKey);
+    EXPECT_EQ(EmptyNameKey, NamedKey);
+    EXPECT_EQ(NamedKey, KeyForName("other"));
+    EXPECT_EQ(NamedKey, KeyForName(std::string{"primitive"}.c_str()));
+}
+
+TEST(RadientMeshViewSourceTest, GeometryIndicesSelectValidationRanges)
+{
+    const std::array<Uint32, 2> GeometryElementCounts{3, 6};
+
+    std::array<RadientMeshPrimitiveCreateInfo, 2> Primitives{
+        MakePrimitive(0, 3),
+        MakePrimitive(4, 2)};
+
+    std::array<Uint32, 2> GeometryIndices{0, 1};
+
+    RadientMeshViewSource View{
+        MakeViewCI(Primitives.data(), static_cast<Uint32>(Primitives.size()), GeometryIndices.data()),
+        GeometryElementCounts.data(),
+        static_cast<Uint32>(GeometryElementCounts.size())};
+
+    ASSERT_EQ(View.GetStatus(), RADIENT_STATUS_OK);
+    EXPECT_EQ(View.GetGeometryIndex(0), 0u);
+    EXPECT_EQ(View.GetGeometryIndex(1), 1u);
+    EXPECT_EQ(View.GetPrimitive(1).FirstElement, 4u);
+    EXPECT_EQ(View.GetPrimitive(1).ElementCount, 2u);
+
+    // The same primitive range is valid in geometry 1, but would overrun geometry 0.
+    std::array<Uint32, 2> WrongGeometryForRange{0, 0};
+    RadientMeshViewSource InvalidRangeView{
+        MakeViewCI(Primitives.data(), static_cast<Uint32>(Primitives.size()), WrongGeometryForRange.data()),
+        GeometryElementCounts.data(),
+        static_cast<Uint32>(GeometryElementCounts.size())};
+    EXPECT_EQ(InvalidRangeView.GetStatus(), RADIENT_STATUS_INVALID_ARGUMENT);
+
+    // Geometry indices must reference one of the source geometries.
+    std::array<Uint32, 2> OutOfRangeGeometry{0, 2};
+    RadientMeshViewSource InvalidGeometryView{
+        MakeViewCI(Primitives.data(), static_cast<Uint32>(Primitives.size()), OutOfRangeGeometry.data()),
+        GeometryElementCounts.data(),
+        static_cast<Uint32>(GeometryElementCounts.size())};
+    EXPECT_EQ(InvalidGeometryView.GetStatus(), RADIENT_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(RadientMeshViewSourceTest, CacheKeyIncludesGeometrySourcesAndIndices)
+{
+    const std::array<Uint32, 2>    GeometryElementCounts{3, 3};
+    const std::vector<std::string> GeometryKeys{
+        "mesh-geometry:0",
+        "mesh-geometry:1"};
+
+    RadientMeshPrimitiveCreateInfo Primitive = MakePrimitive();
+
+    std::array<Uint32, 1> Geometry0{0};
+    std::array<Uint32, 1> Geometry1{1};
+
+    RadientMeshViewSource View0{
+        MakeViewCI(&Primitive, 1, Geometry0.data()),
+        GeometryElementCounts.data(),
+        static_cast<Uint32>(GeometryElementCounts.size())};
+    RadientMeshViewSource View1{
+        MakeViewCI(&Primitive, 1, Geometry1.data()),
+        GeometryElementCounts.data(),
+        static_cast<Uint32>(GeometryElementCounts.size())};
+
+    const std::string CacheKey = View0.MakeCacheKey(GeometryKeys);
+    ASSERT_FALSE(CacheKey.empty());
+
+    EXPECT_NE(CacheKey, View1.MakeCacheKey(GeometryKeys));
+
+    std::vector<std::string> DifferentGeometryKeys = GeometryKeys;
+    DifferentGeometryKeys[1]                       = "mesh-geometry:other";
+    EXPECT_EQ(CacheKey, View0.MakeCacheKey(DifferentGeometryKeys));
+
+    std::vector<std::string> EmptyUnusedGeometryKey = GeometryKeys;
+    EmptyUnusedGeometryKey[1].clear();
+    EXPECT_EQ(CacheKey, View0.MakeCacheKey(EmptyUnusedGeometryKey));
+
+    std::vector<std::string> EmptyGeometryKey = GeometryKeys;
+    EmptyGeometryKey[0].clear();
+    EXPECT_TRUE(View0.MakeCacheKey(EmptyGeometryKey).empty());
+}

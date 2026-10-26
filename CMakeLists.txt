@@ -7,11 +7,25 @@ if(NOT DILIGENT_TOOLS_FOUND)
 	message(FATAL_ERROR "DiligentTools module is not found. Please add DiligentTools module to the project before DiligentFX module.")
 endif()
 
+option(DILIGENT_NO_RADIENT "Do not build Radient" OFF)
+
 set(DILIGENT_FX_FOUND TRUE CACHE INTERNAL "DiligentFX module is found")
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 project(DiligentFX CXX)
+
+include(FetchContent)
+
+message("Fetching entt repository...")
+FetchContent_Declare(
+    entt
+    GIT_REPOSITORY https://github.com/skypjack/entt
+    GIT_TAG        v3.16.0
+)
+FetchContent_MakeAvailable(entt)
+set_directory_root_folder(${entt_SOURCE_DIR} "DiligentFX/ThirdParty/entt")
+
 
 file(GLOB_RECURSE SHADERS LIST_DIRECTORIES false Shaders/*.*)
 
@@ -51,6 +65,9 @@ add_subdirectory(Utilities)
 add_subdirectory(Components)
 add_subdirectory(PostProcess)
 add_subdirectory(PBR)
+if (NOT DILIGENT_NO_RADIENT)
+    add_subdirectory(Radient)
+endif()
 
 if(DILIGENT_USD_PATH)
     add_subdirectory(Hydrogent)
@@ -118,6 +135,9 @@ if(DILIGENT_INSTALL_FX)
     )
     install(DIRECTORY    PBR/interface
             DESTINATION  "${CMAKE_INSTALL_INCLUDEDIR}/${DILIGENT_FX_DIR}/PBR"
+    )
+    install(DIRECTORY    Radient/interface
+            DESTINATION  "${CMAKE_INSTALL_INCLUDEDIR}/${DILIGENT_FX_DIR}/Radient"
     )
     install(DIRECTORY    Shaders
             DESTINATION  "."

@@ -1,0 +1,674 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#pragma once
+
+/// \file
+/// Defines the canonical parameter names used by Radient standard materials.
+///
+/// The documented ranges describe values accepted by the standard shading
+/// model. Material writers store values verbatim and do not clamp or
+/// otherwise validate these semantic constraints.
+
+#include "../../../DiligentCore/Primitives/interface/BasicTypes.h"
+
+#if DILIGENT_CPP_INTERFACE
+#    include "RadientMaterials.h"
+#endif
+
+DILIGENT_BEGIN_NAMESPACE(Diligent)
+
+/// Revision of the generated standard-material schema.
+///
+/// The revision changes whenever parameter names, ordering, types, defaults,
+/// presence conditions, or semantic interpretation change. Runtime parameter
+/// handles remain specific to one material definition and must not be persisted.
+static DILIGENT_CONSTEXPR Uint32 RadientStandardMaterialSchemaVersion = 1;
+
+/// Name of the FLOAT4 linear RGBA base-color multiplier. Components are expected
+/// in [0, 1]. The parameter is present in metallic-roughness and unlit materials
+/// and defaults to (1, 1, 1, 1).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorFactorName[] = "BaseColorFactor";
+
+/// Name of the FLOAT4 linear RGBA diffuse multiplier. Components are expected
+/// in [0, 1]. The parameter is present in specular-glossiness materials and
+/// defaults to (1, 1, 1, 1).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseFactorName[] = "DiffuseFactor";
+
+/// Name of the FLOAT metallic multiplier. The value is expected in [0, 1]. The
+/// parameter is present in metallic-roughness materials and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicFactorName[] = "MetallicFactor";
+
+/// Name of the FLOAT perceptual-roughness multiplier. The value is expected in
+/// [0, 1]. The parameter is present in metallic-roughness materials and defaults
+/// to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialRoughnessFactorName[] = "RoughnessFactor";
+
+/// Name of the FLOAT3 linear RGB specular-reflectance multiplier. Components
+/// are expected in [0, 1]. The parameter is present in specular-glossiness
+/// materials and defaults to (1, 1, 1).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularFactorName[] = "SpecularFactor";
+
+/// Name of the FLOAT glossiness multiplier. The value is expected in [0, 1].
+/// The parameter is present in specular-glossiness materials and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialGlossinessFactorName[] = "GlossinessFactor";
+
+/// Name of the FLOAT3 linear RGB emissive multiplier. Values are expected to be
+/// non-negative and may exceed 1 for HDR emission. The parameter is present in
+/// lit materials and defaults to (0, 0, 0).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveFactorName[] = "EmissiveFactor";
+
+/// Name of the FLOAT multiplier applied to the X and Y components decoded from
+/// the normal texture. The parameter is present when a normal texture is declared
+/// and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalScaleName[] = "NormalScale";
+
+/// Name of the FLOAT occlusion multiplier. The value is expected in [0, 1]. The
+/// parameter is present when an occlusion texture is declared and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionStrengthName[] = "OcclusionStrength";
+
+/// Name of the FLOAT clear-coat coverage. The value is expected in [0, 1]. The
+/// parameter requires the clear-coat feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatFactorName[] = "ClearCoatFactor";
+
+/// Name of the FLOAT clear-coat perceptual roughness. The value is expected in
+/// [0, 1]. The parameter requires the clear-coat feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessFactorName[] = "ClearCoatRoughnessFactor";
+
+/// Name of the FLOAT multiplier applied to the X and Y components decoded from
+/// the clear-coat normal texture. The parameter is present when that texture is
+/// declared and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalScaleName[] = "ClearCoatNormalScale";
+
+/// Name of the FLOAT3 linear RGB sheen-color multiplier. Components are expected
+/// in [0, 1]. The parameter requires the sheen feature and defaults to (0, 0, 0).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorFactorName[] = "SheenColorFactor";
+
+/// Name of the FLOAT sheen perceptual roughness. The value is expected in [0, 1].
+/// The parameter requires the sheen feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessFactorName[] = "SheenRoughnessFactor";
+
+/// Name of the FLOAT dielectric-specular weight. The value is expected in
+/// [0, 1]. The parameter requires the specular feature and defaults to 1.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularWeightName[] = "SpecularWeight";
+
+/// Name of the FLOAT3 linear RGB dielectric-specular multiplier. Components
+/// are expected to be non-negative and may exceed 1. The parameter requires
+/// the specular feature and defaults to (1, 1, 1).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorFactorName[] = "SpecularColorFactor";
+
+/// Name of the FLOAT anisotropy strength. The value is expected in [0, 1]. The
+/// parameter requires the anisotropy feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyStrengthName[] = "AnisotropyStrength";
+
+/// Name of the FLOAT anisotropy rotation in radians around the shading normal,
+/// relative to the material tangent. The parameter requires the anisotropy
+/// feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyRotationName[] = "AnisotropyRotation";
+
+/// Name of the FLOAT iridescence coverage. The value is expected in [0, 1]. The
+/// parameter requires the iridescence feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceFactorName[] = "IridescenceFactor";
+
+/// Name of the FLOAT iridescent thin-film index of refraction. The value is
+/// expected to be at least 1. The parameter requires the iridescence feature and
+/// defaults to 1.3.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceIORName[] = "IridescenceIOR";
+
+/// Name of the FLOAT minimum iridescent thin-film thickness in nanometers. The
+/// value is expected to be non-negative and no greater than the maximum
+/// thickness. The parameter requires the iridescence feature and defaults to 100.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessMinimumName[] = "IridescenceThicknessMinimum";
+
+/// Name of the FLOAT maximum iridescent thin-film thickness in nanometers. The
+/// value is expected to be no less than the minimum thickness. The parameter
+/// requires the iridescence feature and defaults to 400.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessMaximumName[] = "IridescenceThicknessMaximum";
+
+/// Name of the FLOAT transmission coverage. The value is expected in [0, 1]. The
+/// parameter requires the transmission feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionFactorName[] = "TransmissionFactor";
+
+/// Name of the FLOAT material index of refraction. The value is expected to be at
+/// least 1. The parameter requires the transmission feature and defaults to 1.5.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIORName[] = "IOR";
+
+/// Name of the FLOAT non-negative volume-thickness multiplier in scene units.
+/// The parameter requires the volume feature and defaults to 0.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessFactorName[] = "ThicknessFactor";
+
+/// Name of the FLOAT3 linear RGB attenuation color. Components are expected in
+/// [0, 1]. The parameter requires the volume feature and defaults to (1, 1, 1).
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAttenuationColorName[] = "AttenuationColor";
+
+/// Name of the FLOAT distance in scene units over which transmitted light is
+/// attenuated to AttenuationColor. The value is expected to be positive. The
+/// parameter requires the volume feature and defaults to the maximum Float32
+/// value, which represents no attenuation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAttenuationDistanceName[] = "AttenuationDistance";
+
+/// Every declared texture semantic has the following seven parameters:
+///
+/// - `Texture`: TEXTURE, with a definition-provided semantic fallback that may
+///   be null.
+/// - `TextureUVSelector`: INT texture-coordinate set index. Non-negative values
+///   enable sampling from the selected UV set; -1 disables sampling. The default
+///   is -1.
+/// - `TextureUVScale`: FLOAT2 scale applied before rotation, default (1, 1).
+/// - `TextureUVRotation`: FLOAT counter-clockwise UV rotation in radians, default
+///   zero. Angles are unwrapped: animation interpolates the supplied values
+///   directly, without choosing the shortest arc.
+/// - `TextureUVBias`: FLOAT2 translation applied after the transform, default zero.
+/// - `TextureWrapU` and `TextureWrapV`: UINT
+///   RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE values, default
+///   RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE_WRAP.
+
+/// Name of the base-color TEXTURE. RGB is interpreted as sRGB, alpha is linear,
+/// and all channels are expected in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureName[] = "BaseColorTexture";
+/// Name of the base-color texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureUVSelectorName[] = "BaseColorTextureUVSelector";
+/// Name of the base-color texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureUVScaleName[] = "BaseColorTextureUVScale";
+/// Name of the base-color texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureUVRotationName[] = "BaseColorTextureUVRotation";
+/// Name of the base-color texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureUVBiasName[] = "BaseColorTextureUVBias";
+/// Name of the base-color texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureWrapUName[] = "BaseColorTextureWrapU";
+/// Name of the base-color texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialBaseColorTextureWrapVName[] = "BaseColorTextureWrapV";
+
+/// Name of the diffuse TEXTURE. RGB is interpreted as sRGB, alpha is linear,
+/// and all channels are expected in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureName[] = "DiffuseTexture";
+/// Name of the diffuse texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureUVSelectorName[] = "DiffuseTextureUVSelector";
+/// Name of the diffuse texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureUVScaleName[] = "DiffuseTextureUVScale";
+/// Name of the diffuse texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureUVRotationName[] = "DiffuseTextureUVRotation";
+/// Name of the diffuse texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureUVBiasName[] = "DiffuseTextureUVBias";
+/// Name of the diffuse texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureWrapUName[] = "DiffuseTextureWrapU";
+/// Name of the diffuse texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialDiffuseTextureWrapVName[] = "DiffuseTextureWrapV";
+
+/// Name of the metallic-roughness TEXTURE. It is sampled linearly; G stores
+/// perceptual roughness and B stores metallic, both in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureName[] = "MetallicRoughnessTexture";
+/// Name of the metallic-roughness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureUVSelectorName[] = "MetallicRoughnessTextureUVSelector";
+/// Name of the metallic-roughness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureUVScaleName[] = "MetallicRoughnessTextureUVScale";
+/// Name of the metallic-roughness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureUVRotationName[] = "MetallicRoughnessTextureUVRotation";
+/// Name of the metallic-roughness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureUVBiasName[] = "MetallicRoughnessTextureUVBias";
+/// Name of the metallic-roughness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureWrapUName[] = "MetallicRoughnessTextureWrapU";
+/// Name of the metallic-roughness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialMetallicRoughnessTextureWrapVName[] = "MetallicRoughnessTextureWrapV";
+
+/// Name of the specular-glossiness TEXTURE. RGB is interpreted as sRGB and
+/// stores specular reflectance; linear A stores glossiness. All channels are
+/// expected in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureName[] = "SpecularGlossinessTexture";
+/// Name of the specular-glossiness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureUVSelectorName[] = "SpecularGlossinessTextureUVSelector";
+/// Name of the specular-glossiness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureUVScaleName[] = "SpecularGlossinessTextureUVScale";
+/// Name of the specular-glossiness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureUVRotationName[] = "SpecularGlossinessTextureUVRotation";
+/// Name of the specular-glossiness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureUVBiasName[] = "SpecularGlossinessTextureUVBias";
+/// Name of the specular-glossiness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureWrapUName[] = "SpecularGlossinessTextureWrapU";
+/// Name of the specular-glossiness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularGlossinessTextureWrapVName[] = "SpecularGlossinessTextureWrapV";
+
+/// Name of the normal TEXTURE. Linear RGB values in [0, 1] encode a tangent-space
+/// normal that is remapped to [-1, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureName[] = "NormalTexture";
+/// Name of the normal texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureUVSelectorName[] = "NormalTextureUVSelector";
+/// Name of the normal texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureUVScaleName[] = "NormalTextureUVScale";
+/// Name of the normal texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureUVRotationName[] = "NormalTextureUVRotation";
+/// Name of the normal texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureUVBiasName[] = "NormalTextureUVBias";
+/// Name of the normal texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureWrapUName[] = "NormalTextureWrapU";
+/// Name of the normal texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialNormalTextureWrapVName[] = "NormalTextureWrapV";
+
+/// Name of the occlusion TEXTURE. It is sampled linearly and R stores the
+/// occlusion value in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureName[] = "OcclusionTexture";
+/// Name of the occlusion texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureUVSelectorName[] = "OcclusionTextureUVSelector";
+/// Name of the occlusion texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureUVScaleName[] = "OcclusionTextureUVScale";
+/// Name of the occlusion texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureUVRotationName[] = "OcclusionTextureUVRotation";
+/// Name of the occlusion texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureUVBiasName[] = "OcclusionTextureUVBias";
+/// Name of the occlusion texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureWrapUName[] = "OcclusionTextureWrapU";
+/// Name of the occlusion texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialOcclusionTextureWrapVName[] = "OcclusionTextureWrapV";
+
+/// Name of the emissive TEXTURE. RGB is interpreted as sRGB and expected in
+/// [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureName[] = "EmissiveTexture";
+/// Name of the emissive texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureUVSelectorName[] = "EmissiveTextureUVSelector";
+/// Name of the emissive texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureUVScaleName[] = "EmissiveTextureUVScale";
+/// Name of the emissive texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureUVRotationName[] = "EmissiveTextureUVRotation";
+/// Name of the emissive texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureUVBiasName[] = "EmissiveTextureUVBias";
+/// Name of the emissive texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureWrapUName[] = "EmissiveTextureWrapU";
+/// Name of the emissive texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialEmissiveTextureWrapVName[] = "EmissiveTextureWrapV";
+
+/// Name of the clear-coat TEXTURE. It is sampled linearly and R stores coverage
+/// in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureName[] = "ClearCoatTexture";
+/// Name of the clear-coat texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureUVSelectorName[] = "ClearCoatTextureUVSelector";
+/// Name of the clear-coat texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureUVScaleName[] = "ClearCoatTextureUVScale";
+/// Name of the clear-coat texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureUVRotationName[] = "ClearCoatTextureUVRotation";
+/// Name of the clear-coat texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureUVBiasName[] = "ClearCoatTextureUVBias";
+/// Name of the clear-coat texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureWrapUName[] = "ClearCoatTextureWrapU";
+/// Name of the clear-coat texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatTextureWrapVName[] = "ClearCoatTextureWrapV";
+
+/// Name of the clear-coat roughness TEXTURE. It is sampled linearly and G stores
+/// perceptual roughness in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureName[] = "ClearCoatRoughnessTexture";
+/// Name of the clear-coat roughness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureUVSelectorName[] = "ClearCoatRoughnessTextureUVSelector";
+/// Name of the clear-coat roughness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureUVScaleName[] = "ClearCoatRoughnessTextureUVScale";
+/// Name of the clear-coat roughness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureUVRotationName[] = "ClearCoatRoughnessTextureUVRotation";
+/// Name of the clear-coat roughness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureUVBiasName[] = "ClearCoatRoughnessTextureUVBias";
+/// Name of the clear-coat roughness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureWrapUName[] = "ClearCoatRoughnessTextureWrapU";
+/// Name of the clear-coat roughness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatRoughnessTextureWrapVName[] = "ClearCoatRoughnessTextureWrapV";
+
+/// Name of the clear-coat normal TEXTURE. Linear RGB values in [0, 1] encode a
+/// tangent-space normal that is remapped to [-1, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureName[] = "ClearCoatNormalTexture";
+/// Name of the clear-coat normal texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureUVSelectorName[] = "ClearCoatNormalTextureUVSelector";
+/// Name of the clear-coat normal texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureUVScaleName[] = "ClearCoatNormalTextureUVScale";
+/// Name of the clear-coat normal texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureUVRotationName[] = "ClearCoatNormalTextureUVRotation";
+/// Name of the clear-coat normal texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureUVBiasName[] = "ClearCoatNormalTextureUVBias";
+/// Name of the clear-coat normal texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureWrapUName[] = "ClearCoatNormalTextureWrapU";
+/// Name of the clear-coat normal texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialClearCoatNormalTextureWrapVName[] = "ClearCoatNormalTextureWrapV";
+
+/// Name of the sheen-color TEXTURE. RGB is interpreted as sRGB and expected in
+/// [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureName[] = "SheenColorTexture";
+/// Name of the sheen-color texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureUVSelectorName[] = "SheenColorTextureUVSelector";
+/// Name of the sheen-color texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureUVScaleName[] = "SheenColorTextureUVScale";
+/// Name of the sheen-color texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureUVRotationName[] = "SheenColorTextureUVRotation";
+/// Name of the sheen-color texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureUVBiasName[] = "SheenColorTextureUVBias";
+/// Name of the sheen-color texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureWrapUName[] = "SheenColorTextureWrapU";
+/// Name of the sheen-color texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenColorTextureWrapVName[] = "SheenColorTextureWrapV";
+
+/// Name of the sheen-roughness TEXTURE. It is sampled linearly and A stores
+/// perceptual roughness in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureName[] = "SheenRoughnessTexture";
+/// Name of the sheen-roughness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureUVSelectorName[] = "SheenRoughnessTextureUVSelector";
+/// Name of the sheen-roughness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureUVScaleName[] = "SheenRoughnessTextureUVScale";
+/// Name of the sheen-roughness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureUVRotationName[] = "SheenRoughnessTextureUVRotation";
+/// Name of the sheen-roughness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureUVBiasName[] = "SheenRoughnessTextureUVBias";
+/// Name of the sheen-roughness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureWrapUName[] = "SheenRoughnessTextureWrapU";
+/// Name of the sheen-roughness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSheenRoughnessTextureWrapVName[] = "SheenRoughnessTextureWrapV";
+
+/// Name of the specular-weight TEXTURE. It is sampled linearly and A stores
+/// the dielectric-specular weight in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureName[] = "SpecularTexture";
+/// Name of the specular-weight texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureUVSelectorName[] = "SpecularTextureUVSelector";
+/// Name of the specular-weight texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureUVScaleName[] = "SpecularTextureUVScale";
+/// Name of the specular-weight texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureUVRotationName[] = "SpecularTextureUVRotation";
+/// Name of the specular-weight texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureUVBiasName[] = "SpecularTextureUVBias";
+/// Name of the specular-weight texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureWrapUName[] = "SpecularTextureWrapU";
+/// Name of the specular-weight texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularTextureWrapVName[] = "SpecularTextureWrapV";
+
+/// Name of the specular-color TEXTURE. RGB is interpreted as sRGB and expected
+/// to be non-negative; values may exceed 1 after decoding.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureName[] = "SpecularColorTexture";
+/// Name of the specular-color texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureUVSelectorName[] = "SpecularColorTextureUVSelector";
+/// Name of the specular-color texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureUVScaleName[] = "SpecularColorTextureUVScale";
+/// Name of the specular-color texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureUVRotationName[] = "SpecularColorTextureUVRotation";
+/// Name of the specular-color texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureUVBiasName[] = "SpecularColorTextureUVBias";
+/// Name of the specular-color texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureWrapUName[] = "SpecularColorTextureWrapU";
+/// Name of the specular-color texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialSpecularColorTextureWrapVName[] = "SpecularColorTextureWrapV";
+
+/// Name of the anisotropy TEXTURE. It is sampled linearly; RG encodes the
+/// tangent-space direction remapped from [0, 1] to [-1, 1], and B stores strength
+/// in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureName[] = "AnisotropyTexture";
+/// Name of the anisotropy texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureUVSelectorName[] = "AnisotropyTextureUVSelector";
+/// Name of the anisotropy texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureUVScaleName[] = "AnisotropyTextureUVScale";
+/// Name of the anisotropy texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureUVRotationName[] = "AnisotropyTextureUVRotation";
+/// Name of the anisotropy texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureUVBiasName[] = "AnisotropyTextureUVBias";
+/// Name of the anisotropy texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureWrapUName[] = "AnisotropyTextureWrapU";
+/// Name of the anisotropy texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialAnisotropyTextureWrapVName[] = "AnisotropyTextureWrapV";
+
+/// Name of the iridescence TEXTURE. It is sampled linearly and R stores coverage
+/// in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureName[] = "IridescenceTexture";
+/// Name of the iridescence texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureUVSelectorName[] = "IridescenceTextureUVSelector";
+/// Name of the iridescence texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureUVScaleName[] = "IridescenceTextureUVScale";
+/// Name of the iridescence texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureUVRotationName[] = "IridescenceTextureUVRotation";
+/// Name of the iridescence texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureUVBiasName[] = "IridescenceTextureUVBias";
+/// Name of the iridescence texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureWrapUName[] = "IridescenceTextureWrapU";
+/// Name of the iridescence texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceTextureWrapVName[] = "IridescenceTextureWrapV";
+
+/// Name of the iridescence-thickness TEXTURE. It is sampled linearly and G stores
+/// a value in [0, 1] that interpolates between the minimum and maximum thickness.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureName[] = "IridescenceThicknessTexture";
+/// Name of the iridescence-thickness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureUVSelectorName[] = "IridescenceThicknessTextureUVSelector";
+/// Name of the iridescence-thickness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureUVScaleName[] = "IridescenceThicknessTextureUVScale";
+/// Name of the iridescence-thickness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureUVRotationName[] = "IridescenceThicknessTextureUVRotation";
+/// Name of the iridescence-thickness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureUVBiasName[] = "IridescenceThicknessTextureUVBias";
+/// Name of the iridescence-thickness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureWrapUName[] = "IridescenceThicknessTextureWrapU";
+/// Name of the iridescence-thickness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialIridescenceThicknessTextureWrapVName[] = "IridescenceThicknessTextureWrapV";
+
+/// Name of the transmission TEXTURE. It is sampled linearly and R stores
+/// transmission coverage in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureName[] = "TransmissionTexture";
+/// Name of the transmission texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureUVSelectorName[] = "TransmissionTextureUVSelector";
+/// Name of the transmission texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureUVScaleName[] = "TransmissionTextureUVScale";
+/// Name of the transmission texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureUVRotationName[] = "TransmissionTextureUVRotation";
+/// Name of the transmission texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureUVBiasName[] = "TransmissionTextureUVBias";
+/// Name of the transmission texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureWrapUName[] = "TransmissionTextureWrapU";
+/// Name of the transmission texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialTransmissionTextureWrapVName[] = "TransmissionTextureWrapV";
+
+/// Name of the thickness TEXTURE. It is sampled linearly and G stores a
+/// non-negative thickness multiplier, conventionally in [0, 1].
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureName[] = "ThicknessTexture";
+/// Name of the thickness texture INT UV-set selector.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureUVSelectorName[] = "ThicknessTextureUVSelector";
+/// Name of the thickness texture FLOAT2 UV scale.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureUVScaleName[] = "ThicknessTextureUVScale";
+/// Name of the thickness texture FLOAT counter-clockwise UV rotation in radians.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureUVRotationName[] = "ThicknessTextureUVRotation";
+/// Name of the thickness texture FLOAT2 UV translation.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureUVBiasName[] = "ThicknessTextureUVBias";
+/// Name of the thickness texture UINT U address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureWrapUName[] = "ThicknessTextureWrapU";
+/// Name of the thickness texture UINT V address mode.
+static DILIGENT_CONSTEXPR Char RadientStandardMaterialThicknessTextureWrapVName[] = "ThicknessTextureWrapV";
+
+#if DILIGENT_CPP_INTERFACE
+
+/// Canonical names of the seven parameters that define one standard-material
+/// texture semantic.
+struct RadientStandardMaterialTextureParameterNames
+{
+    const Char* Texture    = nullptr;
+    const Char* UVSelector = nullptr;
+    const Char* UVScale    = nullptr;
+    const Char* UVRotation = nullptr;
+    const Char* UVBias     = nullptr;
+    const Char* WrapU      = nullptr;
+    const Char* WrapV      = nullptr;
+};
+
+/// Values of the seven parameters that define one standard-material texture
+/// semantic. Constructing the values with a texture selects UV set 0 by default;
+/// constructing them without a texture disables sampling by setting UVSelector
+/// to -1. SetStandardMaterialTextureParameters uses the definition-provided
+/// fallback texture when pTexture is null.
+struct RadientStandardMaterialTextureParameters
+{
+    RadientStandardMaterialTextureParameters() noexcept = default;
+
+    explicit RadientStandardMaterialTextureParameters(IRadientTextureAsset* pTexture_) noexcept :
+        pTexture{pTexture_},
+        UVSelector{pTexture_ != nullptr ? 0 : -1}
+    {}
+
+    IRadientTextureAsset*                 pTexture   = nullptr;
+    Int32                                 UVSelector = -1;
+    RadientFloat2                         UVScale{1.f, 1.f};
+    Float32                               UVRotation = 0.f;
+    RadientFloat2                         UVBias{};
+    RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE WrapU = RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE_WRAP;
+    RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE WrapV = RADIENT_MATERIAL_TEXTURE_ADDRESS_MODE_WRAP;
+};
+
+#    define RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Name)            \
+        static DILIGENT_CONSTEXPR RadientStandardMaterialTextureParameterNames \
+            RadientStandardMaterial##Name##TextureParameterNames               \
+        {                                                                      \
+            RadientStandardMaterial##Name##TextureName,                        \
+                RadientStandardMaterial##Name##TextureUVSelectorName,          \
+                RadientStandardMaterial##Name##TextureUVScaleName,             \
+                RadientStandardMaterial##Name##TextureUVRotationName,          \
+                RadientStandardMaterial##Name##TextureUVBiasName,              \
+                RadientStandardMaterial##Name##TextureWrapUName,               \
+                RadientStandardMaterial##Name##TextureWrapVName                \
+        }
+
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(BaseColor);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Diffuse);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(MetallicRoughness);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(SpecularGlossiness);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Normal);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Occlusion);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Emissive);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(ClearCoat);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(ClearCoatRoughness);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(ClearCoatNormal);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(SheenColor);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(SheenRoughness);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Specular);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(SpecularColor);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Anisotropy);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Iridescence);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(IridescenceThickness);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Transmission);
+RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES(Thickness);
+
+#    undef RADIENT_STANDARD_MATERIAL_TEXTURE_PARAMETER_NAMES
+
+/// Sets all seven parameters of one standard-material texture semantic on Writer.
+/// The function resolves every parameter before recording any change. It returns
+/// RADIENT_STATUS_OK when at least one assignment was newly recorded and
+/// RADIENT_STATUS_NO_CHANGE when Writer already had all seven identical assignments
+/// pending. Commit() determines whether the assignments change the material. When
+/// Parameters.pTexture is null, the texture is reset to the definition-provided
+/// fallback. If a writer setter fails, earlier changes remain pending; retry the
+/// operation with the same writer or discard that writer without committing it.
+inline RADIENT_STATUS SetStandardMaterialTextureParameters(
+    const IRadientMaterialDefinitionAsset&              Definition,
+    IRadientMaterialWriter&                             Writer,
+    const RadientStandardMaterialTextureParameterNames& Names,
+    const RadientStandardMaterialTextureParameters&     Parameters)
+{
+    RadientMaterialParameterHandle Texture;
+    RadientMaterialParameterHandle UVSelector;
+    RadientMaterialParameterHandle UVScale;
+    RadientMaterialParameterHandle UVRotation;
+    RadientMaterialParameterHandle UVBias;
+    RadientMaterialParameterHandle WrapU;
+    RadientMaterialParameterHandle WrapV;
+
+    RADIENT_STATUS Status = Definition.FindParameter(Names.Texture, &Texture);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.UVSelector, &UVSelector);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.UVScale, &UVScale);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.UVRotation, &UVRotation);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.UVBias, &UVBias);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.WrapU, &WrapU);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = Definition.FindParameter(Names.WrapV, &WrapV);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+
+    const auto HasExpectedType = [&](RadientMaterialParameterHandle  Handle,
+                                     RADIENT_MATERIAL_PARAMETER_TYPE Type) {
+        const RadientMaterialParameterDesc& Desc = Definition.GetParameterDesc(Handle.Index);
+        return Desc.Type == Type && Desc.ArraySize == 1;
+    };
+    if (!HasExpectedType(Texture, RADIENT_MATERIAL_PARAMETER_TYPE_TEXTURE) ||
+        !HasExpectedType(UVSelector, RADIENT_MATERIAL_PARAMETER_TYPE_INT) ||
+        !HasExpectedType(UVScale, RADIENT_MATERIAL_PARAMETER_TYPE_FLOAT2) ||
+        !HasExpectedType(UVRotation, RADIENT_MATERIAL_PARAMETER_TYPE_FLOAT) ||
+        !HasExpectedType(UVBias, RADIENT_MATERIAL_PARAMETER_TYPE_FLOAT2) ||
+        !HasExpectedType(WrapU, RADIENT_MATERIAL_PARAMETER_TYPE_UINT) ||
+        !HasExpectedType(WrapV, RADIENT_MATERIAL_PARAMETER_TYPE_UINT))
+    {
+        return RADIENT_STATUS_INVALID_DATA;
+    }
+
+    bool Changed = false;
+
+    IRadientTextureAsset* const pTexture = Parameters.pTexture != nullptr ?
+        Parameters.pTexture :
+        Definition.GetParameterDesc(Texture.Index).pDefaultTexture;
+
+    Status = Writer.SetTexture(Texture, 0, pTexture);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(UVSelector, Parameters.UVSelector);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(UVScale, Parameters.UVScale);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(UVRotation, Parameters.UVRotation);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(UVBias, Parameters.UVBias);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(WrapU, Parameters.WrapU);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    Status = Writer.SetParameter(WrapV, Parameters.WrapV);
+    if (RADIENT_FAILED(Status))
+        return Status;
+    Changed |= Status == RADIENT_STATUS_OK;
+
+    return Changed ? RADIENT_STATUS_OK : RADIENT_STATUS_NO_CHANGE;
+}
+
+#endif // DILIGENT_CPP_INTERFACE
+
+DILIGENT_END_NAMESPACE // Diligent

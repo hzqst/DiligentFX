@@ -1,0 +1,397 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "RadientMeshPrimitives.h"
+
+#include "Math/RadientMath.hpp"
+
+#include "Errors.hpp"
+#include "RefCntAutoPtr.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <utility>
+#include <vector>
+
+namespace Diligent
+{
+
+namespace
+{
+
+constexpr Float32 PI = 3.14159265358979323846f;
+
+constexpr Uint32 CubeFaceCount = 6;
+
+struct MeshBuilder
+{
+    std::vector<RadientFloat3>     Positions;
+    std::vector<RadientFloat3>     Normals;
+    std::vector<RadientFloat2>     TexCoords0;
+    std::vector<RadientColorRGBA8> Colors0;
+    std::vector<Uint32>            Indices;
+};
+
+Float32 Clamp(Float32 Value, Float32 MinValue, Float32 MaxValue)
+{
+    return Value < MinValue ? MinValue : (Value > MaxValue ? MaxValue : Value);
+}
+
+RadientFloat2 GetSphericalTexCoord(const RadientFloat3& Normal)
+{
+    const Float32 U = 0.5f + std::atan2(Normal.z, Normal.x) / (2.f * PI);
+    const Float32 V = std::acos(Clamp(Normal.y, -1.f, 1.f)) / PI;
+    return RadientFloat2{U, V};
+}
+
+Uint32 GetSeamFixedVertex(MeshBuilder& Mesh, std::vector<Uint32>& SeamVertices, Uint32 Vertex)
+{
+    Uint32& SeamVertex = SeamVertices[Vertex];
+    if (SeamVertex != ~0u)
+        return SeamVertex;
+
+    SeamVertex = static_cast<Uint32>(Mesh.Positions.size());
+    Mesh.Positions.push_back(Mesh.Positions[Vertex]);
+    Mesh.Normals.push_back(Mesh.Normals[Vertex]);
+    Mesh.TexCoords0.push_back(RadientFloat2{Mesh.TexCoords0[Vertex].x + 1.f, Mesh.TexCoords0[Vertex].y});
+    if (!Mesh.Colors0.empty())
+        Mesh.Colors0.push_back(Mesh.Colors0[Vertex]);
+    return SeamVertex;
+}
+
+void FixSphericalTexCoordSeams(MeshBuilder& Mesh)
+{
+    std::vector<Uint32> SeamVertices(Mesh.Positions.size(), ~0u);
+
+    for (size_t Index = 0; Index + 2 < Mesh.Indices.size(); Index += 3)
+    {
+        const Uint32 Vertex0 = Mesh.Indices[Index + 0];
+        const Uint32 Vertex1 = Mesh.Indices[Index + 1];
+        const Uint32 Vertex2 = Mesh.Indices[Index + 2];
+
+        const Float32 U0 = Mesh.TexCoords0[Vertex0].x;
+        const Float32 U1 = Mesh.TexCoords0[Vertex1].x;
+        const Float32 U2 = Mesh.TexCoords0[Vertex2].x;
+
+        const Float32 MinU = std::min(U0, std::min(U1, U2));
+        const Float32 MaxU = std::max(U0, std::max(U1, U2));
+        if (MaxU - MinU <= 0.5f)
+            continue;
+
+        if (U0 < 0.5f)
+            Mesh.Indices[Index + 0] = GetSeamFixedVertex(Mesh, SeamVertices, Vertex0);
+        if (U1 < 0.5f)
+            Mesh.Indices[Index + 1] = GetSeamFixedVertex(Mesh, SeamVertices, Vertex1);
+        if (U2 < 0.5f)
+            Mesh.Indices[Index + 2] = GetSeamFixedVertex(Mesh, SeamVertices, Vertex2);
+    }
+}
+
+void AddQuadIndices(std::vector<Uint32>& Indices,
+                    Uint32               Vertex00,
+                    Uint32               Vertex10,
+                    Uint32               Vertex01,
+                    Uint32               Vertex11)
+{
+    Indices.push_back(Vertex00);
+    Indices.push_back(Vertex10);
+    Indices.push_back(Vertex01);
+
+    Indices.push_back(Vertex10);
+    Indices.push_back(Vertex11);
+    Indices.push_back(Vertex01);
+}
+
+void AddCubeFace(MeshBuilder&             Mesh,
+                 const RadientFloat3&     Normal,
+                 const RadientFloat3&     Tangent,
+                 const RadientFloat3&     Bitangent,
+                 const RadientColorRGBA8* pColor,
+                 Float32                  Size,
+                 Uint32                   Subdivisions)
+{
+    const Uint32  BaseVertex = static_cast<Uint32>(Mesh.Positions.size());
+    const Float32 HalfSize   = Size * 0.5f;
+
+    for (Uint32 Y = 0; Y <= Subdivisions; ++Y)
+    {
+        const Float32 V = static_cast<Float32>(Y) / static_cast<Float32>(Subdivisions);
+        for (Uint32 X = 0; X <= Subdivisions; ++X)
+        {
+            const Float32 U = static_cast<Float32>(X) / static_cast<Float32>(Subdivisions);
+
+            RadientFloat3 Position = Normal * HalfSize;
+            Position               = Position + Tangent * ((U - 0.5f) * Size);
+            Position               = Position + Bitangent * ((V - 0.5f) * Size);
+
+            Mesh.Positions.push_back(Position);
+            Mesh.Normals.push_back(Normal);
+            Mesh.TexCoords0.push_back(RadientFloat2{U, 1.f - V});
+            if (pColor != nullptr)
+                Mesh.Colors0.push_back(*pColor);
+        }
+    }
+
+    const Uint32 RowStride = Subdivisions + 1;
+    for (Uint32 Y = 0; Y < Subdivisions; ++Y)
+    {
+        for (Uint32 X = 0; X < Subdivisions; ++X)
+        {
+            const Uint32 Vertex00 = BaseVertex + Y * RowStride + X;
+            const Uint32 Vertex10 = Vertex00 + 1;
+            const Uint32 Vertex01 = Vertex00 + RowStride;
+            const Uint32 Vertex11 = Vertex01 + 1;
+            AddQuadIndices(Mesh.Indices, Vertex00, Vertex10, Vertex01, Vertex11);
+        }
+    }
+}
+
+MeshBuilder CreateCube(Float32 Size, Uint32 Subdivisions, const RadientColorRGBA8* pFaceColors = nullptr)
+{
+    MeshBuilder Mesh;
+
+    const Uint32 VertexCountPerFace = (Subdivisions + 1) * (Subdivisions + 1);
+    Mesh.Positions.reserve(6u * VertexCountPerFace);
+    Mesh.Normals.reserve(6u * VertexCountPerFace);
+    Mesh.TexCoords0.reserve(6u * VertexCountPerFace);
+    if (pFaceColors != nullptr)
+        Mesh.Colors0.reserve(CubeFaceCount * VertexCountPerFace);
+    Mesh.Indices.reserve(6u * Subdivisions * Subdivisions * 6u);
+
+    const auto GetFaceColor = [pFaceColors](Uint32 Face) {
+        return pFaceColors != nullptr ? &pFaceColors[Face] : nullptr;
+    };
+
+    AddCubeFace(Mesh, {+1.f, 0.f, 0.f}, {0.f, 0.f, -1.f}, {0.f, +1.f, 0.f}, GetFaceColor(0), Size, Subdivisions);
+    AddCubeFace(Mesh, {-1.f, 0.f, 0.f}, {0.f, 0.f, +1.f}, {0.f, +1.f, 0.f}, GetFaceColor(1), Size, Subdivisions);
+    AddCubeFace(Mesh, {0.f, +1.f, 0.f}, {+1.f, 0.f, 0.f}, {0.f, 0.f, -1.f}, GetFaceColor(2), Size, Subdivisions);
+    AddCubeFace(Mesh, {0.f, -1.f, 0.f}, {+1.f, 0.f, 0.f}, {0.f, 0.f, +1.f}, GetFaceColor(3), Size, Subdivisions);
+    AddCubeFace(Mesh, {0.f, 0.f, +1.f}, {+1.f, 0.f, 0.f}, {0.f, +1.f, 0.f}, GetFaceColor(4), Size, Subdivisions);
+    AddCubeFace(Mesh, {0.f, 0.f, -1.f}, {-1.f, 0.f, 0.f}, {0.f, +1.f, 0.f}, GetFaceColor(5), Size, Subdivisions);
+
+    return Mesh;
+}
+
+MeshBuilder CreateSphere(Float32 Radius, Uint32 Subdivisions)
+{
+    MeshBuilder Mesh = CreateCube(2.f, Subdivisions);
+
+    for (size_t Vertex = 0; Vertex < Mesh.Positions.size(); ++Vertex)
+    {
+        const RadientFloat3 Normal = RadientMath::Normalize(Mesh.Positions[Vertex]);
+        Mesh.Positions[Vertex]     = Normal * Radius;
+        Mesh.Normals[Vertex]       = Normal;
+        Mesh.TexCoords0[Vertex]    = GetSphericalTexCoord(Normal);
+    }
+
+    FixSphericalTexCoordSeams(Mesh);
+    return Mesh;
+}
+
+RADIENT_STATUS CreatePrimitiveMesh(IRadientAssetManager*  pAssetManager,
+                                   const Char*            Name,
+                                   IRadientMaterialAsset* pMaterial,
+                                   MeshBuilder            Mesh,
+                                   IRadientMeshAsset**    ppMesh)
+{
+    if (ppMesh == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    DEV_CHECK_ERR(*ppMesh == nullptr, "Output mesh pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+    *ppMesh = nullptr;
+
+    if (pAssetManager == nullptr ||
+        Mesh.Positions.empty() ||
+        Mesh.Indices.empty())
+    {
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    }
+
+    // Index and vertex blobs own their storage independently so either source can
+    // release its data as soon as processing completes.
+    auto         pIndices   = std::make_unique<std::vector<Uint32>>(std::move(Mesh.Indices));
+    const Uint32 IndexCount = static_cast<Uint32>(pIndices->size());
+
+    RadientDataBlobCreateInfo IndexBlobCI;
+    IndexBlobCI.pData     = pIndices->data();
+    IndexBlobCI.Size      = pIndices->size() * sizeof(Uint32);
+    IndexBlobCI.pUserData = pIndices.get();
+    IndexBlobCI.OnDestroy = [](void* pUserData) {
+        delete static_cast<std::vector<Uint32>*>(pUserData);
+    };
+    RefCntAutoPtr<IRadientDataBlob> pIndexBlob;
+    RADIENT_STATUS                  Status = CreateRadientDataBlob(IndexBlobCI, RADIENT_DATA_BLOB_STORAGE_MODE_REFERENCE, &pIndexBlob);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    pIndices.release();
+
+    const auto         pMeshData = std::make_shared<MeshBuilder>(std::move(Mesh));
+    const MeshBuilder& MeshData  = *pMeshData;
+
+    RefCntAutoPtr<IRadientDataBlob>     VertexBlobs[4];
+    IRadientDataBlob*                   VertexData[4]{};
+    RadientVertexAttributeDesc          VertexAttributes[4]{};
+    const RadientVertexBufferLayoutDesc VertexBuffers[4]{};
+    Uint32                              VertexBufferCount = 0;
+
+    const auto AddVertexAttribute = [&](const auto& Vertices, const Char* Semantic,
+                                        RADIENT_VERTEX_COMPONENT_TYPE ComponentType, Uint32 ComponentCount,
+                                        Bool Normalized = False) {
+        if (Vertices.empty())
+            return RADIENT_STATUS_OK;
+
+        const Uint32              BufferIndex = VertexBufferCount;
+        auto                      pOwner      = std::make_unique<std::shared_ptr<MeshBuilder>>(pMeshData);
+        RadientDataBlobCreateInfo BlobCI;
+        BlobCI.pData     = Vertices.data();
+        BlobCI.Size      = Vertices.size() * sizeof(Vertices[0]);
+        BlobCI.pUserData = pOwner.get();
+        BlobCI.OnDestroy = [](void* pUserData) {
+            delete static_cast<std::shared_ptr<MeshBuilder>*>(pUserData);
+        };
+        // Create a reference-mode blob to avoid copying vertex data. The blob will hold a
+        // shared_ptr to the MeshBuilder, ensuring that the vertex data remains valid until
+        // the blob is destroyed. When the blob is destroyed, it will delete the shared_ptr,
+        // which will in turn release the MeshBuilder if there are no other references to it.
+        const RADIENT_STATUS Status = CreateRadientDataBlob(BlobCI, RADIENT_DATA_BLOB_STORAGE_MODE_REFERENCE, &VertexBlobs[BufferIndex]);
+        if (Status == RADIENT_STATUS_OK)
+        {
+            pOwner.release();
+            VertexData[BufferIndex]       = VertexBlobs[BufferIndex];
+            VertexAttributes[BufferIndex] = {Semantic, BufferIndex, RADIENT_VERTEX_AUTO_OFFSET,
+                                             ComponentType, ComponentCount, Normalized};
+            ++VertexBufferCount;
+        }
+        return Status;
+    };
+
+    Status = AddVertexAttribute(MeshData.Positions, "POSITION", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 3);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = AddVertexAttribute(MeshData.Normals, "NORMAL", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 3);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = AddVertexAttribute(MeshData.TexCoords0, "TEXCOORD_0", RADIENT_VERTEX_COMPONENT_TYPE_FLOAT32, 2);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+    Status = AddVertexAttribute(MeshData.Colors0, "COLOR_0", RADIENT_VERTEX_COMPONENT_TYPE_UINT8, 4, True);
+    if (Status != RADIENT_STATUS_OK)
+        return Status;
+
+    RadientMeshPrimitiveCreateInfo PrimitiveCI{};
+    PrimitiveCI.Name         = Name;
+    PrimitiveCI.FirstElement = 0;
+    PrimitiveCI.ElementCount = IndexCount;
+    PrimitiveCI.pMaterial    = pMaterial;
+
+    RadientMeshCreateInfo MeshCI{};
+    MeshCI.Name                      = Name;
+    MeshCI.VertexData.VertexLayout    = {VertexAttributes, VertexBufferCount, VertexBuffers, VertexBufferCount};
+    MeshCI.VertexData.ppVertexBuffers = VertexData;
+    MeshCI.VertexData.VertexCount     = static_cast<Uint32>(MeshData.Positions.size());
+    MeshCI.IndexData.pIndexBuffer     = pIndexBlob;
+    MeshCI.IndexData.IndexCount       = IndexCount;
+    MeshCI.IndexData.IndexType        = RADIENT_INDEX_TYPE_UINT32;
+    MeshCI.pPrimitives               = &PrimitiveCI;
+    MeshCI.PrimitiveCount            = 1;
+
+    return pAssetManager->CreateMesh(MeshCI, ppMesh);
+}
+
+} // namespace
+
+RADIENT_STATUS CreateRadientCubeMesh(IRadientAssetManager*            pAssetManager,
+                                     const RadientCubeMeshCreateInfo& MeshCI,
+                                     IRadientMeshAsset**              ppMesh)
+{
+    if (ppMesh == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    DEV_CHECK_ERR(*ppMesh == nullptr, "Output mesh pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+    *ppMesh = nullptr;
+
+    if (!RadientMath::IsFinitePositive(MeshCI.Size))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    const Uint32 Subdivisions = MeshCI.Subdivisions != 0 ? MeshCI.Subdivisions : 1u;
+    return CreatePrimitiveMesh(pAssetManager, MeshCI.Name, MeshCI.pMaterial,
+                               CreateCube(MeshCI.Size, Subdivisions, MeshCI.pFaceColors), ppMesh);
+}
+
+RADIENT_STATUS CreateRadientSphereMesh(IRadientAssetManager*              pAssetManager,
+                                       const RadientSphereMeshCreateInfo& MeshCI,
+                                       IRadientMeshAsset**                ppMesh)
+{
+    if (ppMesh == nullptr)
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+    DEV_CHECK_ERR(*ppMesh == nullptr, "Output mesh pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+    *ppMesh = nullptr;
+
+    if (!RadientMath::IsFinitePositive(MeshCI.Radius))
+        return RADIENT_STATUS_INVALID_ARGUMENT;
+
+    const Uint32 Subdivisions = MeshCI.Subdivisions != 0 ? MeshCI.Subdivisions : 1u;
+    return CreatePrimitiveMesh(pAssetManager, MeshCI.Name, MeshCI.pMaterial,
+                               CreateSphere(MeshCI.Radius, Subdivisions), ppMesh);
+}
+
+} // namespace Diligent
+
+extern "C"
+{
+    Diligent::RADIENT_STATUS Diligent_CreateRadientCubeMesh(Diligent::IRadientAssetManager*            pAssetManager,
+                                                            const Diligent::RadientCubeMeshCreateInfo* pMeshCI,
+                                                            Diligent::IRadientMeshAsset**              ppMesh)
+    {
+        if (pMeshCI == nullptr)
+        {
+            if (ppMesh != nullptr)
+            {
+                DEV_CHECK_ERR(*ppMesh == nullptr, "Output mesh pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+                *ppMesh = nullptr;
+            }
+            return Diligent::RADIENT_STATUS_INVALID_ARGUMENT;
+        }
+
+        return Diligent::CreateRadientCubeMesh(pAssetManager, *pMeshCI, ppMesh);
+    }
+
+    Diligent::RADIENT_STATUS Diligent_CreateRadientSphereMesh(Diligent::IRadientAssetManager*              pAssetManager,
+                                                              const Diligent::RadientSphereMeshCreateInfo* pMeshCI,
+                                                              Diligent::IRadientMeshAsset**                ppMesh)
+    {
+        if (pMeshCI == nullptr)
+        {
+            if (ppMesh != nullptr)
+            {
+                DEV_CHECK_ERR(*ppMesh == nullptr, "Output mesh pointer must be null. Overwriting a non-null output pointer may result in memory leaks.");
+                *ppMesh = nullptr;
+            }
+            return Diligent::RADIENT_STATUS_INVALID_ARGUMENT;
+        }
+
+        return Diligent::CreateRadientSphereMesh(pAssetManager, *pMeshCI, ppMesh);
+    }
+}

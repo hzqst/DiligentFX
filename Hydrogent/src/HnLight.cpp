@@ -551,7 +551,7 @@ void HnLight::Sync(pxr::HdSceneDelegate* SceneDelegate,
     {
         if (ShadowMapMgr != nullptr)
         {
-            const TextureDesc& ShadowMapDesc = ShadowMapMgr->GetAtlasDesc();
+            const TextureDesc ShadowMapDesc = ShadowMapMgr->GetAtlasDesc();
 
             const pxr::VtValue ShadowResolutionVal = SceneDelegate->GetLightParamValue(Id, HnLightPrivateTokens->shadowResolution);
             if (ShadowResolutionVal.IsHolding<int>())
@@ -689,7 +689,7 @@ void HnLight::PrecomputeIBLCubemaps(HnRenderDelegate& RenderDelegate)
     };
     pCtx->TransitionResourceStates(_countof(Barriers), Barriers);
 
-    RenderDelegate.GetUSDRenderer()->PrecomputeCubemaps(pCtx, pEnvMap->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
+    RenderDelegate.PrecomputeIBLCubemaps(pEnvMap->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE));
 
     m_LightResourcesVersion = LightResourcesVersion;
 }

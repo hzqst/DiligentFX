@@ -1,5 +1,5 @@
 /*
- *  Copyright 2023-2025 Diligent Graphics LLC
+ *  Copyright 2023-2026 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -297,7 +297,7 @@ void ScreenSpaceReflection::PrepareResources(IRenderDevice* pDevice, IDeviceCont
     }
 }
 
-void ScreenSpaceReflection::Execute(const RenderAttributes& RenderAttribs)
+POST_FX_EXECUTION_STATUS ScreenSpaceReflection::Execute(const RenderAttributes& RenderAttribs)
 {
     DEV_CHECK_ERR(RenderAttribs.pDevice != nullptr, "RenderAttribs.pDevice must not be null");
     DEV_CHECK_ERR(RenderAttribs.pDeviceContext != nullptr, "RenderAttribs.pDeviceContext must not be null");
@@ -318,7 +318,7 @@ void ScreenSpaceReflection::Execute(const RenderAttributes& RenderAttribs)
 
     ScopedDebugGroup DebugGroupGlobal{RenderAttribs.pDeviceContext, "ScreenSpaceReflection"};
 
-    bool AllPSOsReady = PrepareShadersAndPSO(RenderAttribs) && RenderAttribs.pPostFXContext->IsPSOsReady();
+    const bool AllPSOsReady = PrepareShadersAndPSO(RenderAttribs) && RenderAttribs.pPostFXContext->IsPSOsReady();
     UpdateConstantBuffer(RenderAttribs, !AllPSOsReady);
     if (AllPSOsReady)
     {
@@ -338,6 +338,10 @@ void ScreenSpaceReflection::Execute(const RenderAttributes& RenderAttribs)
     // Release references to input resources
     for (Uint32 ResourceIdx = 0; ResourceIdx <= RESOURCE_IDENTIFIER_INPUT_LAST; ++ResourceIdx)
         m_Resources[ResourceIdx].Release();
+
+    return AllPSOsReady ?
+        POST_FX_EXECUTION_STATUS_READY :
+        POST_FX_EXECUTION_STATUS_PENDING;
 }
 
 bool ScreenSpaceReflection::UpdateUI(HLSL::ScreenSpaceReflectionAttribs& SSRAttribs, FEATURE_FLAGS& FeatureFlags, Uint32& DisplayMode)
@@ -759,7 +763,7 @@ void ScreenSpaceReflection::UpdateConstantBuffer(const RenderAttributes& RenderA
     if (ResetTimer)
         m_FrameTimer.Restart();
 
-    float Alpha = std::min(std::max(m_FrameTimer.GetElapsedTimef(), 0.0f), 1.0f);
+    const float Alpha = RenderAttribs.pPostFXContext->GetTransitionAlpha(m_FrameTimer.GetElapsedTimef());
 
     bool UpdateRequired =
         m_SSRAttribs->AlphaInterpolation != Alpha ||

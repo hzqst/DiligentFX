@@ -1,0 +1,200 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#pragma once
+
+#include "RadientAssetCache.hpp"
+#include "RadientAssets.h"
+#include "RadientSceneAssetImporter.hpp"
+#include "RadientMaterialAssetManager.hpp"
+#include "RadientMeshAssetManager.hpp"
+#include "RadientTextureAssetManager.hpp"
+#include "ThreadPool.h"
+#include "Cast.hpp"
+#include "ObjectBase.hpp"
+#include "RefCntAutoPtr.hpp"
+
+#ifdef _MSC_VER
+#    pragma warning(push)
+#    pragma warning(disable : 4702) // unreachable code in Abseil templates
+#endif
+#include "absl/container/flat_hash_map.h"
+#ifdef _MSC_VER
+#    pragma warning(pop)
+#endif
+
+#include <atomic>
+#include <cstddef>
+#include <shared_mutex>
+#include <string>
+#include <vector>
+
+namespace Diligent
+{
+
+struct IDeviceContext;
+struct IRenderDevice;
+struct IGPUUploadManager;
+struct ITexture;
+struct ITextureAtlasSuballocation;
+struct ITextureLoader;
+struct ITextureView;
+
+namespace GLTF
+{
+struct Material;
+class ResourceManager;
+} // namespace GLTF
+
+namespace RadientImport
+{
+struct ImportedDocument;
+} // namespace RadientImport
+
+class ScenePayloadImpl;
+
+class RadientAssetManagerImpl final : public ObjectBase<IRadientAssetManager>
+{
+public:
+    using TBase = ObjectBase<IRadientAssetManager>;
+
+    struct CreateInfo
+    {
+        RadientAssetManagerCreateInfo    Assets;
+        RadientResourceManagerCreateInfo Resources;
+        IThreadPool*                     pThreadPool = nullptr;
+        IRenderDevice*                   pDevice     = nullptr;
+    };
+
+    RadientAssetManagerImpl(IReferenceCounters* pRefCounters,
+                            const CreateInfo&   CreateInfo);
+    ~RadientAssetManagerImpl();
+
+    IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_RadientAssetManager, TBase)
+
+    static RefCntAutoPtr<RadientAssetManagerImpl> Create(const CreateInfo& CreateInfo);
+
+    virtual const RadientAssetManagerDesc& DILIGENT_CALL_TYPE GetDesc() const override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateMesh(const RadientMeshCreateInfo& MeshCI,
+                                                         IRadientMeshAsset**          ppMesh) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateSkeleton(const RadientSkeletonDesc& SkeletonDesc,
+                                                             IRadientSkeletonAsset**    ppSkeleton) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateSkin(const RadientSkinDesc& SkinDesc,
+                                                         IRadientSkinAsset**    ppSkin) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateAnimationClip(const RadientAnimationClipDesc& ClipDesc,
+                                                                  IRadientAnimationClipAsset**    ppClip) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateStandardMaterialDefinition(const RadientStandardMaterialDefinitionCreateInfo& DefinitionCI,
+                                                                               IRadientMaterialDefinitionAsset**                  ppDefinition) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE CreateMaterial(IRadientMaterialDefinitionAsset* pDefinition,
+                                                             IRadientMaterialAsset**          ppMaterial) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE LoadTexture(const RadientTextureLoadInfo& LoadInfo,
+                                                          IRadientTextureAsset**        ppTexture) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE RegisterSceneAssetImporter(IRadientSceneAssetImporter* pImporter) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE LoadScene(const RadientSceneLoadInfo& LoadInfo,
+                                                        IRadientSceneAsset**        ppScene) override final;
+
+    virtual RADIENT_STATUS DILIGENT_CALL_TYPE Stop(IDeviceContext* pContext) override final;
+
+    // Creates the mesh services supplied to importer implementations. This
+    // capability is not exposed by the public asset-manager interface.
+    RefCntAutoPtr<IRadientMeshImportServices> CreateMeshImportServices();
+
+    // Must be called from the render thread.
+    static RadientDrawableMeshResolveResult GetDrawableMesh(IRadientMeshAsset* pMesh,
+                                                            bool               RequireGPUResourcesReady);
+
+    static const RadientImport::ImportedDocument* GetImportedScene(IRadientSceneAsset* pScene);
+
+    // Reports scene source load status. OK does not imply GPU resources exist.
+    static RADIENT_STATUS GetSceneLoadStatus(IRadientSceneAsset* pScene);
+
+    // Reports scene GPU resource status. OK means GPU resources are ready.
+    // NO_GPU_DATA means the scene loaded successfully without a GPU backend.
+    static RADIENT_STATUS GetSceneGPUResourceStatus(IRadientSceneAsset* pScene);
+
+    // Returns the requested typed texture SRV if the texture status is OK
+    // (i.e., all required copy commands were enqueued), or nullptr otherwise.
+    // This method must not race with render-thread operations that may access
+    // the texture.
+    static ITextureView* GetTextureSRV(IRadientTextureAsset*  pTexture,
+                                       RadientTextureViewType ViewType = RadientTextureViewType::Linear);
+
+    RADIENT_STATUS UpdateGPUResources(IRenderDevice*  pDevice,
+                                      IDeviceContext* pContext);
+
+    GLTF::ResourceManager*          GetResourceManager() const;
+    RadientTextureAssetManagerStats GetTextureManagerStats() const;
+
+    const RadientMaterialDefaultTextures& GetDefaultMaterialTextures() const noexcept
+    {
+        return m_DefaultMaterialTextures;
+    }
+
+private:
+    class MeshImportServicesImpl;
+
+    RADIENT_STATUS SelectSceneImporter(const RadientSceneLoadInfo&                LoadInfo,
+                                       RefCntAutoPtr<IRadientSceneAssetImporter>& pImporter) const;
+
+    void LoadSceneAsset(ScenePayloadImpl&           Scene,
+                        IRadientSceneAssetImporter& Importer,
+                        const std::string&          SourceURI,
+                        IRadientAssetData*          pSceneData);
+
+    std::string             m_Name;
+    RadientAssetManagerDesc m_Desc;
+
+    RefCntAutoPtr<IThreadPool>           m_pThreadPool;
+    RefCntAutoPtr<IRenderDevice>         m_pDevice;
+    RefCntAutoPtr<IRadientAssetResolver> m_pAssetResolver;
+    RefCntAutoPtr<GLTF::ResourceManager> m_pResourceManager;
+    RefCntAutoPtr<IGPUUploadManager>     m_pUploadManager;
+
+    RadientTextureAssetManagerSharedPtr  m_pTextureManager;
+    RadientMaterialDefaultTextures       m_DefaultMaterialTextures;
+    RadientMaterialAssetManagerSharedPtr m_pMaterialManager;
+    RefCntAutoPtr<IRadientMaterialAsset> m_pDefaultMaterial;
+    RadientMeshAssetManagerSharedPtr     m_pMeshManager;
+
+    RadientAssetCache<ScenePayloadImpl> m_SceneAssetCache;
+
+    mutable std::shared_mutex                              m_SceneImportersMutex;
+    std::vector<RefCntAutoPtr<IRadientSceneAssetImporter>> m_SceneImporters;
+    absl::flat_hash_map<std::string, size_t>               m_SceneImporterIndices;
+
+    std::atomic_bool m_Stopped{false};
+};
+
+} // namespace Diligent

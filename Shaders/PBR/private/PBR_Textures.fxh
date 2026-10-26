@@ -5,6 +5,55 @@
 #   include "AtlasSampling.fxh"
 #endif
 
+// Maximum anisotropy of the samplers used by the material textures.
+#ifndef PBR_BASE_COLOR_MAX_ANISOTROPY
+#   define PBR_BASE_COLOR_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_NORMAL_MAX_ANISOTROPY
+#   define PBR_NORMAL_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_PHYS_DESC_MAX_ANISOTROPY
+#   define PBR_PHYS_DESC_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_OCCLUSION_MAX_ANISOTROPY
+#   define PBR_OCCLUSION_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_EMISSIVE_MAX_ANISOTROPY
+#   define PBR_EMISSIVE_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_CLEAR_COAT_MAX_ANISOTROPY
+#   define PBR_CLEAR_COAT_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_SHEEN_MAX_ANISOTROPY
+#   define PBR_SHEEN_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_SPECULAR_MAX_ANISOTROPY
+#   define PBR_SPECULAR_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_ANISOTROPY_MAX_ANISOTROPY
+#   define PBR_ANISOTROPY_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_IRIDESCENCE_MAX_ANISOTROPY
+#   define PBR_IRIDESCENCE_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_TRANSMISSION_MAX_ANISOTROPY
+#   define PBR_TRANSMISSION_MAX_ANISOTROPY 1.0
+#endif
+
+#ifndef PBR_THICKNESS_MAX_ANISOTROPY
+#   define PBR_THICKNESS_MAX_ANISOTROPY 1.0
+#endif
+
 #ifndef BaseColorTextureAttribId
 #   define BaseColorTextureAttribId 0
 #endif
@@ -76,6 +125,12 @@
 
 #   undef USE_THICKNESS_MAP
 #   define USE_THICKNESS_MAP 0
+
+#   undef USE_SPECULAR_MAP
+#   define USE_SPECULAR_MAP 0
+
+#   undef USE_SPECULAR_COLOR_MAP
+#   define USE_SPECULAR_COLOR_MAP 0
 #endif
 
 SamplerState g_LinearClampSampler;
@@ -87,18 +142,19 @@ SamplerState g_LinearClampSampler;
     TextureCube  g_PrefilteredEnvMap;
 #   define       g_PrefilteredEnvMap_sampler g_LinearClampSampler
 
+#   if ENABLE_SHEEN
+    TextureCube  g_PrefilteredSheenEnvMap;
+#       define   g_PrefilteredSheenEnvMap_sampler g_LinearClampSampler
+#   endif
+
     Texture2D    g_PreintegratedGGX;
 #   define       g_PreintegratedGGX_sampler g_LinearClampSampler
 
-#   if ENABLE_SHEEN
-        Texture2D g_PreintegratedCharlie;
-#       define    g_PreintegratedCharlie_sampler g_LinearClampSampler
-#   endif
 #endif
 
 #if ENABLE_SHEEN
-    Texture2D     g_SheenAlbedoScalingLUT;
-#       define    g_SheenAlbedoScalingLUT_sampler g_LinearClampSampler
+    Texture2D g_PreintegratedSheen;
+#   define    g_PreintegratedSheen_sampler g_LinearClampSampler
 #endif
 
 // Access textures by name:
@@ -166,6 +222,8 @@ SamplerState g_LinearClampSampler;
 #   define IridescenceThicknessTextureId Material.Textures[IridescenceThicknessTextureAttribId].TextureSlice
 #   define TransmissionTextureId         Material.Textures[TransmissionTextureAttribId].TextureSlice
 #   define ThicknessTextureId            Material.Textures[ThicknessTextureAttribId].TextureSlice
+#   define SpecularTextureId             Material.Textures[SpecularTextureAttribId].TextureSlice
+#   define SpecularColorTextureId        Material.Textures[SpecularColorTextureAttribId].TextureSlice
 #endif
 
 #ifndef WEBGPU
@@ -343,6 +401,28 @@ SamplerState g_LinearClampSampler;
     SamplerState g_ThicknessMap_sampler;
 #endif
 
+#if USE_SPECULAR_MAP || USE_SPECULAR_COLOR_MAP
+    SamplerState g_Specular_sampler;
+#endif
+
+#if USE_SPECULAR_MAP
+#   if USE_MATERIAL_TEXTURES_ARRAY
+#       define g_SpecularMap MATERIAL_TEXTURE(SpecularTextureId)
+#   else
+        Texture2DArray g_SpecularMap;
+#   endif
+#   define g_SpecularMap_sampler g_Specular_sampler
+#endif
+
+#if USE_SPECULAR_COLOR_MAP
+#   if USE_MATERIAL_TEXTURES_ARRAY
+#       define g_SpecularColorMap MATERIAL_TEXTURE(SpecularColorTextureId)
+#   else
+        Texture2DArray g_SpecularColorMap;
+#   endif
+#   define g_SpecularColorMap_sampler g_Specular_sampler
+#endif
+
 float2 SelectUV(VSOutput VSOut, float Selector)
 {
 #if USE_TEXCOORD0 && USE_TEXCOORD1
@@ -363,6 +443,7 @@ float2 TransformUV(float2 UV, PBRMaterialTextureAttribs TexAttribs)
 
 float4 SampleTexture(Texture2DArray            Tex,
                      SamplerState              Tex_sampler,
+                     float                     MaxAnisotropy,
                      VSOutput                  VSOut,
                      PBRMaterialTextureAttribs TexAttribs,
                      float                     MipBias,
@@ -400,8 +481,9 @@ float4 SampleTexture(Texture2DArray            Tex,
                 SampleAttribs.fSlice                 = TexAttribs.TextureSlice;
                 SampleAttribs.f4UVRegion             = TexAttribs.AtlasUVScaleAndBias;
                 SampleAttribs.fSmallestValidLevelDim = 4.0;
+                SampleAttribs.MipLevelCount          = UnpackPBRMaterialTextureMipLevelCount(TexAttribs.PackedProps);
                 SampleAttribs.IsNonFilterable        = false;
-                SampleAttribs.fMaxAnisotropy         = 1.0; // Only used on GLES
+                SampleAttribs.fMaxAnisotropy         = MaxAnisotropy;
     
                 SampledValue = SampleTextureAtlas(Tex, Tex_sampler, SampleAttribs);
             }
@@ -439,6 +521,7 @@ float4 GetBaseColor(VSOutput              VSOut,
     {
         BaseColor = SampleTexture(g_BaseColorMap,
                                   g_BaseColorMap_sampler,
+                                  PBR_BASE_COLOR_MAX_ANISOTROPY,
                                   VSOut,
                                   Material.Textures[BaseColorTextureAttribId],
                                   MipBias,
@@ -459,6 +542,7 @@ float4 GetBaseColor(VSOutput              VSOut,
 float3 SampleNormalTexture(PBRMaterialTextureAttribs TexAttribs,
                            Texture2DArray            NormalMap,
                            SamplerState              NormalMap_sampler,
+                           float                     MaxAnisotropy,
                            float2                    NormalMapUV,
                            float2                    SmoothNormalMapUV,
                            float2                    dNormalMapUV_dx,
@@ -482,8 +566,9 @@ float3 SampleNormalTexture(PBRMaterialTextureAttribs TexAttribs,
             SampleAttribs.fSlice                 = TexAttribs.TextureSlice;
             SampleAttribs.f4UVRegion             = TexAttribs.AtlasUVScaleAndBias;
             SampleAttribs.fSmallestValidLevelDim = 4.0;
+            SampleAttribs.MipLevelCount          = UnpackPBRMaterialTextureMipLevelCount(TexAttribs.PackedProps);
             SampleAttribs.IsNonFilterable        = false;
-            SampleAttribs.fMaxAnisotropy         = 1.0; // Only used on GLES
+            SampleAttribs.fMaxAnisotropy         = MaxAnisotropy;
 
             SampledNormal = SampleTextureAtlas(NormalMap, NormalMap_sampler, SampleAttribs).xyz;
         }
@@ -526,6 +611,7 @@ float3 GetMicroNormal(PBRMaterialShaderInfo Material,
         MicroNormal = SampleNormalTexture(Material.Textures[NormalTextureAttribId],
                                           g_NormalMap,
                                           g_NormalMap_sampler,
+                                          PBR_NORMAL_MAX_ANISOTROPY,
                                           NormalMapUV,
                                           SmoothNormalMapUV,
                                           dNormalMapUV_dx,
@@ -553,6 +639,7 @@ float GetOcclusion(VSOutput              VSOut,
     {
         Occlusion = SampleTexture(g_OcclusionMap,
                                   g_OcclusionMap_sampler,
+                                  PBR_OCCLUSION_MAX_ANISOTROPY,
                                   VSOut,
                                   Material.Textures[OcclusionTextureAttribId],
                                   MipBias,
@@ -571,6 +658,7 @@ float3 GetEmissive(VSOutput              VSOut,
     {
         Emissive = SampleTexture(g_EmissiveMap,
                                  g_EmissiveMap_sampler,
+                                 PBR_EMISSIVE_MAX_ANISOTROPY,
                                  VSOut,
                                  Material.Textures[EmissiveTextureAttribId],
                                  MipBias,
@@ -595,6 +683,7 @@ float4 GetPhysicalDesc(VSOutput              VSOut,
     {
         PhysicalDesc = SampleTexture(g_PhysicalDescriptorMap,
                                      g_PhysicalDescriptorMap_sampler,
+                                     PBR_PHYS_DESC_MAX_ANISOTROPY,
                                      VSOut,
                                      Material.Textures[PhysicalDescriptorTextureAttribId],
                                      MipBias,
@@ -606,6 +695,7 @@ float4 GetPhysicalDesc(VSOutput              VSOut,
         {
             PhysicalDesc.b = SampleTexture(g_MetallicMap,
                                            g_MetallicMap_sampler,
+                                           PBR_PHYS_DESC_MAX_ANISOTROPY,
                                            VSOut,
                                            Material.Textures[MetallicTextureAttribId],
                                            MipBias,
@@ -617,6 +707,7 @@ float4 GetPhysicalDesc(VSOutput              VSOut,
         {
             PhysicalDesc.g = SampleTexture(g_RoughnessMap,
                                            g_RoughnessMap_sampler,
+                                           PBR_PHYS_DESC_MAX_ANISOTROPY,
                                            VSOut,
                                            Material.Textures[RoughnessTextureAttribId],
                                            MipBias,
@@ -633,6 +724,53 @@ float4 GetPhysicalDesc(VSOutput              VSOut,
 
 // Extensions
 
+// Specular
+// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular
+
+// Returns the dielectric specular color in rgb and the specular weight in alpha.
+float4 GetSpecular(VSOutput              VSOut,
+                   PBRMaterialShaderInfo Material,
+                   float                 MipBias)
+{
+#   if ENABLE_SPECULAR
+    {
+        float SpecularWeight = Material.Specular.Factor;
+#       if USE_SPECULAR_MAP
+        {
+            SpecularWeight *= SampleTexture(g_SpecularMap,
+                                            g_SpecularMap_sampler,
+                                            PBR_SPECULAR_MAX_ANISOTROPY,
+                                            VSOut,
+                                            Material.Textures[SpecularTextureAttribId],
+                                            MipBias,
+                                            float4(1.0, 1.0, 1.0, 1.0)).a;
+        }
+#       endif
+
+        float3 SpecularColor = float3(Material.Specular.ColorFactorR,
+                                      Material.Specular.ColorFactorG,
+                                      Material.Specular.ColorFactorB);
+#       if USE_SPECULAR_COLOR_MAP
+        {
+            float3 SampledColor = SampleTexture(g_SpecularColorMap,
+                                                g_SpecularColorMap_sampler,
+                                                PBR_SPECULAR_MAX_ANISOTROPY,
+                                                VSOut,
+                                                Material.Textures[SpecularColorTextureAttribId],
+                                                MipBias,
+                                                float4(1.0, 1.0, 1.0, 1.0)).rgb;
+            SpecularColor *= TO_LINEAR(SampledColor);
+        }
+#       endif
+        return float4(SpecularColor, SpecularWeight);
+    }
+#   else
+    {
+        return float4(1.0, 1.0, 1.0, 1.0);
+    }
+#   endif
+}
+
 // Clear coat
 // https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_clearcoat
 
@@ -647,6 +785,7 @@ float GetClearcoatFactor(VSOutput              VSOut,
         {
             Cearcoat = SampleTexture(g_ClearCoatMap,
                                      g_ClearCoatMap_sampler,
+                                     PBR_CLEAR_COAT_MAX_ANISOTROPY,
                                      VSOut,
                                      Material.Textures[ClearCoatTextureAttribId],
                                      MipBias,
@@ -673,6 +812,7 @@ float GetClearcoatRoughness(VSOutput              VSOut,
         {
             CearcoatRoughness = SampleTexture(g_ClearCoatRoughnessMap,
                                               g_ClearCoatRoughnessMap_sampler,
+                                              PBR_CLEAR_COAT_MAX_ANISOTROPY,
                                               VSOut,
                                               Material.Textures[ClearCoatRoughnessTextureAttribId],
                                               MipBias,
@@ -704,6 +844,7 @@ float3 GetClearcoatNormal(PBRMaterialShaderInfo Material,
                 SampleNormalTexture(Material.Textures[ClearCoatNormalTextureAttribId],
                                     g_ClearCoatNormalMap,
                                     g_ClearCoatNormalMap_sampler,
+                                    PBR_CLEAR_COAT_MAX_ANISOTROPY,
                                     NormalMapUV,
                                     SmoothNormalMapUV,
                                     dNormalMapUV_dx,
@@ -739,6 +880,7 @@ float3 GetSheenColor(VSOutput              VSOut,
         {
             SheenColor = SampleTexture(g_SheenColorMap,
                                        g_SheenColorMap_sampler,
+                                       PBR_SHEEN_MAX_ANISOTROPY,
                                        VSOut,
                                        Material.Textures[SheenColorTextureAttribId],
                                        MipBias,
@@ -766,6 +908,7 @@ float GetSheenRoughness(VSOutput              VSOut,
         {
             SheenRoughness = SampleTexture(g_SheenRoughnessMap,
                                            g_SheenRoughnessMap_sampler,
+                                           PBR_SHEEN_MAX_ANISOTROPY,
                                            VSOut,
                                            Material.Textures[SheenRoughnessTextureAttribId],
                                            MipBias,
@@ -797,6 +940,7 @@ float3 GetAnisotropy(VSOutput              VSOut,
         {
             Anisotropy = SampleTexture(g_AnisotropyMap,
                                        g_AnisotropyMap_sampler,
+                                       PBR_ANISOTROPY_MAX_ANISOTROPY,
                                        VSOut,
                                        Material.Textures[AnisotropyTextureAttribId],
                                        MipBias,
@@ -829,6 +973,7 @@ float GetIridescence(VSOutput              VSOut,
         {
             Iridescence = SampleTexture(g_IridescenceMap,
                                         g_IridescenceMap_sampler,
+                                        PBR_IRIDESCENCE_MAX_ANISOTROPY,
                                         VSOut,
                                         Material.Textures[IridescenceTextureAttribId],
                                         MipBias,
@@ -856,6 +1001,7 @@ float GetIridescenceThickness(VSOutput              VSOut,
         {
             Thickness = SampleTexture(g_IridescenceThicknessMap,
                                       g_IridescenceThicknessMap_sampler,
+                                      PBR_IRIDESCENCE_MAX_ANISOTROPY,
                                       VSOut,
                                       Material.Textures[IridescenceThicknessTextureAttribId],
                                       MipBias,
@@ -886,6 +1032,7 @@ float GetTransmission(VSOutput              VSOut,
         {
             Transmission = SampleTexture(g_TransmissionMap,
                                          g_TransmissionMap_sampler,
+                                         PBR_TRANSMISSION_MAX_ANISOTROPY,
                                          VSOut,
                                          Material.Textures[TransmissionTextureAttribId],
                                          MipBias,
@@ -916,6 +1063,7 @@ float GetVolumeThickness(VSOutput              VSOut,
         {
             Thickness = SampleTexture(g_ThicknessMap,
                                       g_ThicknessMap_sampler,
+                                      PBR_THICKNESS_MAX_ANISOTROPY,
                                       VSOut,
                                       Material.Textures[ThicknessTextureAttribId],
                                       MipBias,

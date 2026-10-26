@@ -6,7 +6,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os:         ["windows-latest", "ubuntu-24.04", "macos-26"]
+        os:         ["windows-2025", "ubuntu-24.04", "macos-26"]
         build_type: ["Debug", "Release"]
 
         exclude:
@@ -15,7 +15,7 @@ jobs:
             build_type: "Release"
 
         include:
-          - os:         "windows-latest"
+          - os:         "windows-2025"
             host_name:  "Win10"
             cmake_args: "-DDILIGENT_NO_WEBGPU=ON"
 
@@ -32,21 +32,21 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: DiligentGraphics/github-action/checkout@v14
+      uses: DiligentGraphics/github-action/checkout@v28
 
     - name: Set up build environment
       if:   success()
-      uses: DiligentGraphics/github-action/setup-build-env@v14
+      uses: DiligentGraphics/github-action/setup-build-env@v28
       with:
         platform: Web
 
     - name: Configure CMake
       if:   success()
-      uses: DiligentGraphics/github-action/configure-cmake@v14
+      uses: DiligentGraphics/github-action/configure-cmake@v28
       with:
         build-type: ${{ matrix.build_type }}
         cmake-args: ${{ matrix.cmake_args }}
 
     - name: Build
       if:   success()
-      uses: DiligentGraphics/github-action/build@v14
+      uses: DiligentGraphics/github-action/build@v28

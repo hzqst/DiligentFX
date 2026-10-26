@@ -165,8 +165,7 @@ static RefCntAutoPtr<IBuffer> CreateJointsBuffer(IRenderDevice* pDevice, USD_Ren
 }
 
 static std::shared_ptr<USD_Renderer> CreateUSDRenderer(const HnRenderDelegate::CreateInfo& RenderDelegateCI,
-                                                       IBuffer*                            pPrimitiveAttribsCB,
-                                                       IObject*                            MaterialSRBCache)
+                                                       IBuffer*                            pPrimitiveAttribsCB)
 {
     USD_Renderer::CreateInfo USDRendererCI;
 
@@ -250,12 +249,6 @@ static std::shared_ptr<USD_Renderer> CreateUSDRenderer(const HnRenderDelegate::C
 
         USDRendererCI.ShaderTexturesArrayMode   = USD_Renderer::SHADER_TEXTURE_ARRAY_MODE_STATIC;
         USDRendererCI.MaterialTexturesArraySize = TexturesArraySize;
-        VERIFY_EXPR(MaterialSRBCache != nullptr);
-        USDRendererCI.GetStaticShaderTextureIds = [MaterialSRBCache](const USD_Renderer::PSOKey& Key) {
-            // User value in the PSO key is the shader indexing ID that identifies the static texture
-            // indexing in the SRB cache.
-            return HnMaterial::GetStaticShaderTextureIds(MaterialSRBCache, Key.GetUserValue());
-        };
     }
     else
     {
@@ -307,6 +300,24 @@ static std::shared_ptr<USD_Renderer> CreateUSDRenderer(const HnRenderDelegate::C
     USDRendererCI.pJointsBuffer       = pJointsCB;
 
     return std::make_shared<USD_Renderer>(RenderDelegateCI.pDevice, RenderDelegateCI.pRenderStateCache, RenderDelegateCI.pContext, USDRendererCI);
+}
+
+static bool CreatePBRIBLCubemaps(PBR_Renderer&                Renderer,
+                                 IDeviceContext*              pContext,
+                                 RefCntAutoPtr<ITextureView>& pIrradianceCubeSRV,
+                                 RefCntAutoPtr<ITextureView>& pPrefilteredEnvMapSRV)
+{
+    if (pContext == nullptr)
+        return false;
+
+    RefCntAutoPtr<ITexture> pIrradianceCube    = Renderer.CreateIrradianceCube(pContext, "Hydrogent irradiance cube map");
+    RefCntAutoPtr<ITexture> pPrefilteredEnvMap = Renderer.CreatePrefilteredEnvMap(pContext, "Hydrogent prefiltered environment map");
+    if (pIrradianceCube == nullptr || pPrefilteredEnvMap == nullptr)
+        return false;
+
+    pIrradianceCubeSRV    = pIrradianceCube->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    pPrefilteredEnvMapSRV = pPrefilteredEnvMap->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    return pIrradianceCubeSRV != nullptr && pPrefilteredEnvMapSRV != nullptr;
 }
 
 static bool CheckSparseTextureSupport(IRenderDevice* pDevice)
@@ -439,7 +450,7 @@ HnRenderDelegate::HnRenderDelegate(const CreateInfo& CI) :
     m_ResourceMgr{CreateResourceManager(CI)},
     m_PrimitiveAttribsCB{CreatePrimitiveAttribsCB(CI.pDevice)},
     m_MaterialSRBCache{HnMaterial::CreateSRBCache()},
-    m_USDRenderer{CreateUSDRenderer(CI, m_PrimitiveAttribsCB, m_MaterialSRBCache)},
+    m_USDRenderer{CreateUSDRenderer(CI, m_PrimitiveAttribsCB)},
     m_TextureRegistry{
         std::make_shared<HnTextureRegistry>(
             HnTextureRegistry::CreateInfo{
@@ -487,6 +498,11 @@ HnRenderDelegate::HnRenderDelegate(const CreateInfo& CI) :
     m_ShadowMapManager{CreateShadowMapManager(CI)}
 {
     HnMaterial::InitSRBCache(*this);
+
+    if (!CreatePBRIBLCubemaps(*m_USDRenderer, m_pContext, m_pIrradianceCubeSRV, m_pPrefilteredEnvMapSRV))
+    {
+        UNEXPECTED("Failed to create Hydrogent IBL cubemaps");
+    }
 
     const Uint32 ConstantBufferOffsetAlignment = m_pDevice->GetAdapterInfo().Buffer.ConstantBufferOffsetAlignment;
 
@@ -544,6 +560,26 @@ HnRenderDelegate::~HnRenderDelegate()
     // Note that this can't be done in the texture registry's destructor because shared pointer is
     // destroyed before the destructor is called.
     m_TextureRegistry->WaitForAsyncTasks();
+}
+
+bool HnRenderDelegate::PrecomputeIBLCubemaps(ITextureView* pEnvironmentMapSRV)
+{
+    if (m_USDRenderer == nullptr ||
+        m_pContext == nullptr ||
+        pEnvironmentMapSRV == nullptr ||
+        m_pIrradianceCubeSRV == nullptr ||
+        m_pPrefilteredEnvMapSRV == nullptr)
+    {
+        return false;
+    }
+
+    PBR_Renderer::PrecomputeCubemapsAttribs Attribs;
+    Attribs.pEnvironmentMapSRV       = pEnvironmentMapSRV;
+    Attribs.pIrradianceCube          = m_pIrradianceCubeSRV->GetTexture();
+    Attribs.pPrefilteredEnvMap       = m_pPrefilteredEnvMapSRV->GetTexture();
+    Attribs.SphereMapRow0IsNegativeY = true;
+    m_USDRenderer->PrecomputeCubemaps(m_pContext, Attribs);
+    return true;
 }
 
 pxr::HdRenderParam* HnRenderDelegate::GetRenderParam() const
@@ -804,6 +840,7 @@ void HnRenderDelegate::CommitResources(pxr::HdChangeTracker* tracker)
                                          BindPrimitiveAttribsBuffer,
                                          BindMaterialAttribsBuffer,
                                          ShadowSRV);
+        m_USDRenderer->SetIBLResourceViews(SRB, m_pIrradianceCubeSRV, m_pPrefilteredEnvMapSRV);
         if (IShaderResourceVariable* pVar = SRB->GetVariableByName(SHADER_TYPE_VERTEX, "cbFrameAttribs"))
         {
             // m_FrameAttribsCB has space for the main pass and all shadow passes.

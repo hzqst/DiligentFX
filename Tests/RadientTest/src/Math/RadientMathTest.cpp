@@ -1,0 +1,497 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#include "TestingEnvironment.hpp"
+#include "gtest/gtest.h"
+
+#include "Math/RadientMath.hpp"
+#include "RadientMathTestHelpers.hpp"
+
+#include <cmath>
+
+using namespace Diligent;
+using namespace Diligent::Testing;
+
+namespace
+{
+
+static constexpr float EPSILON = 1e-5f;
+
+void ExpectRotationNear(const RadientQuaternion& Value,
+                        const RadientQuaternion& Reference)
+{
+    const float Dot =
+        Value.x * Reference.x +
+        Value.y * Reference.y +
+        Value.z * Reference.z +
+        Value.w * Reference.w;
+    const float Sign = Dot < 0.f ? -1.f : 1.f;
+
+    EXPECT_NEAR(Value.x * Sign, Reference.x, EPSILON);
+    EXPECT_NEAR(Value.y * Sign, Reference.y, EPSILON);
+    EXPECT_NEAR(Value.z * Sign, Reference.z, EPSILON);
+    EXPECT_NEAR(Value.w * Sign, Reference.w, EPSILON);
+}
+
+TEST(RadientMathTest, ToFloat2)
+{
+    // Converts RadientFloat2 to Diligent float2 without changing component values.
+    const float2 Value = RadientMath::ToFloat2(RadientFloat2{1.f, 2.f});
+    EXPECT_EQ(Value.x, 1.f);
+    EXPECT_EQ(Value.y, 2.f);
+}
+
+TEST(RadientMathTest, BuildsReverseDepthCameraProjection)
+{
+    RadientCameraComponent Camera;
+    Camera.ClippingRange = {0.25f, 100.f};
+
+    const RadientMath::CameraProjection Projection =
+        RadientMath::GetCameraProjection(Camera, 16.f / 9.f, false, true);
+
+    const auto ProjectDepth = [&](float CameraZ) {
+        const float4 ClipPosition = float4{0.f, 0.f, CameraZ, 1.f} * Projection.Matrix;
+        return ClipPosition.z / ClipPosition.w;
+    };
+
+    EXPECT_FLOAT_EQ(Projection.NearPlaneZ, Camera.ClippingRange.x);
+    EXPECT_FLOAT_EQ(Projection.FarPlaneZ, Camera.ClippingRange.y);
+    EXPECT_NEAR(ProjectDepth(Projection.NearPlaneZ), 1.f, EPSILON);
+    EXPECT_NEAR(ProjectDepth(Projection.FarPlaneZ), 0.f, EPSILON);
+}
+
+TEST(RadientMathTest, ToFloat3)
+{
+    // Converts RadientFloat3 to Diligent float3 without changing component values.
+    const float3 Value = RadientMath::ToFloat3(RadientFloat3{1.f, 2.f, 3.f});
+    EXPECT_EQ(Value.x, 1.f);
+    EXPECT_EQ(Value.y, 2.f);
+    EXPECT_EQ(Value.z, 3.f);
+}
+
+TEST(RadientMathTest, ToFloat4)
+{
+    // Converts RadientFloat4 to Diligent float4 without changing component values.
+    const float4 Value = RadientMath::ToFloat4(RadientFloat4{1.f, 2.f, 3.f, 4.f});
+    EXPECT_EQ(Value.x, 1.f);
+    EXPECT_EQ(Value.y, 2.f);
+    EXPECT_EQ(Value.z, 3.f);
+    EXPECT_EQ(Value.w, 4.f);
+}
+
+TEST(RadientMathTest, ColorRGBA8ToFloat4)
+{
+    // Converts normalized 8-bit color channels to Diligent float4.
+    const float4 Value = RadientMath::ToFloat4(RadientColorRGBA8{0, 128, 255, 64});
+    EXPECT_FLOAT_EQ(Value.x, 0.f);
+    EXPECT_FLOAT_EQ(Value.y, 128.f / 255.f);
+    EXPECT_FLOAT_EQ(Value.z, 1.f);
+    EXPECT_FLOAT_EQ(Value.w, 64.f / 255.f);
+}
+
+TEST(RadientMathTest, BoneIndicesToFloat4)
+{
+    // Converts integer bone indices to Diligent float4 component values.
+    const float4 Value = RadientMath::ToFloat4(RadientBoneIndices4{1, 2, 3, 4});
+    EXPECT_EQ(Value.x, 1.f);
+    EXPECT_EQ(Value.y, 2.f);
+    EXPECT_EQ(Value.z, 3.f);
+    EXPECT_EQ(Value.w, 4.f);
+}
+
+TEST(RadientMathTest, ToQuaternion)
+{
+    // A zero-length Radient quaternion is treated as identity to avoid invalid
+    // downstream rotation math.
+    const QuaternionF ZeroQuat = RadientMath::ToQuaternion(RadientQuaternion{0.f, 0.f, 0.f, 0.f});
+    EXPECT_EQ(ZeroQuat.q.x, 0.f);
+    EXPECT_EQ(ZeroQuat.q.y, 0.f);
+    EXPECT_EQ(ZeroQuat.q.z, 0.f);
+    EXPECT_EQ(ZeroQuat.q.w, 1.f);
+
+    // Non-unit input should be normalized before being exposed as QuaternionF.
+    const QuaternionF NormalizedQuat = RadientMath::ToQuaternion(RadientQuaternion{0.f, 0.f, 0.f, 2.f});
+    EXPECT_EQ(NormalizedQuat.q.x, 0.f);
+    EXPECT_EQ(NormalizedQuat.q.y, 0.f);
+    EXPECT_EQ(NormalizedQuat.q.z, 0.f);
+    EXPECT_EQ(NormalizedQuat.q.w, 1.f);
+}
+
+TEST(RadientMathTest, NormalizeTransformNormalizesRotation)
+{
+    RadientTransform Transform;
+    Transform.Position = {1.f, 2.f, 3.f};
+    Transform.Rotation = {1.f, 2.f, 3.f, 4.f};
+    Transform.Scale    = {5.f, 6.f, 7.f};
+
+    const RadientTransform NormalizedTransform = RadientMath::NormalizeTransform(Transform);
+    const float            InvLength           = 1.f / std::sqrt(30.f);
+
+    EXPECT_EQ(NormalizedTransform.Position, Transform.Position);
+    EXPECT_NEAR(NormalizedTransform.Rotation.x, Transform.Rotation.x * InvLength, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.y, Transform.Rotation.y * InvLength, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.z, Transform.Rotation.z * InvLength, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.w, Transform.Rotation.w * InvLength, EPSILON);
+    EXPECT_EQ(NormalizedTransform.Scale, Transform.Scale);
+}
+
+TEST(RadientMathTest, NormalizeTransformKeepsUnitRotation)
+{
+    RadientTransform Transform;
+    Transform.Position = {-1.f, -2.f, -3.f};
+    Transform.Rotation = {0.f, 0.f, 0.6f, 0.8f};
+    Transform.Scale    = {0.5f, 1.5f, 2.5f};
+
+    const RadientTransform NormalizedTransform = RadientMath::NormalizeTransform(Transform);
+
+    EXPECT_EQ(NormalizedTransform.Position, Transform.Position);
+    EXPECT_NEAR(NormalizedTransform.Rotation.x, Transform.Rotation.x, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.y, Transform.Rotation.y, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.z, Transform.Rotation.z, EPSILON);
+    EXPECT_NEAR(NormalizedTransform.Rotation.w, Transform.Rotation.w, EPSILON);
+    EXPECT_EQ(NormalizedTransform.Scale, Transform.Scale);
+}
+
+TEST(RadientMathTest, NormalizeTransformTreatsZeroRotationAsIdentity)
+{
+    RadientTransform Transform;
+    Transform.Position = {8.f, 9.f, 10.f};
+    Transform.Rotation = {0.f, 0.f, 0.f, 0.f};
+    Transform.Scale    = {2.f, 3.f, 4.f};
+
+    const RadientTransform NormalizedTransform = RadientMath::NormalizeTransform(Transform);
+
+    EXPECT_EQ(NormalizedTransform.Position, Transform.Position);
+    EXPECT_EQ(NormalizedTransform.Rotation, RadientQuaternion{});
+    EXPECT_EQ(NormalizedTransform.Scale, Transform.Scale);
+}
+
+TEST(RadientMathTest, InterpolatesAnimationValues)
+{
+    ExpectFloat3Near(
+        RadientMath::Lerp(RadientFloat3{0.f, 2.f, 4.f}, RadientFloat3{4.f, 6.f, 8.f}, 0.25f),
+        RadientFloat3{1.f, 3.f, 5.f});
+
+    const RadientQuaternion HalfRotation =
+        RadientMath::Slerp(RadientQuaternion{}, RadientQuaternion{0.f, 0.f, 1.f, 0.f}, 0.5f);
+    ExpectRotationNear(HalfRotation, RadientQuaternion{0.f, 0.f, 0.70710678f, 0.70710678f});
+
+    const RadientQuaternion SameRotation =
+        RadientMath::Slerp(RadientQuaternion{}, RadientQuaternion{0.f, 0.f, 0.f, -1.f}, 0.5f);
+    ExpectRotationNear(SameRotation, RadientQuaternion{});
+
+    ExpectFloat3Near(
+        RadientMath::CubicHermite(
+            RadientFloat3{0.f, 0.f, 0.f},
+            RadientFloat3{2.f, 0.f, 0.f},
+            RadientFloat3{2.f, 0.f, 0.f},
+            RadientFloat3{0.f, 0.f, 0.f},
+            0.5f,
+            2.f),
+        RadientFloat3{1.5f, 0.f, 0.f});
+
+    const RadientQuaternion CubicRotation =
+        RadientMath::CubicHermite(
+            RadientQuaternion{},
+            RadientQuaternion{0.f, 0.f, 0.f, 0.f},
+            RadientQuaternion{0.f, 0.f, 1.f, 0.f},
+            RadientQuaternion{0.f, 0.f, 0.f, 0.f},
+            0.5f,
+            2.f);
+    ExpectRotationNear(CubicRotation, RadientQuaternion{0.f, 0.f, 0.70710678f, 0.70710678f});
+}
+
+TEST(RadientMathTest, ComputesCubicHermiteWeights)
+{
+    Float32 StartValueWeight;
+    Float32 StartTangentWeight;
+    Float32 EndValueWeight;
+    Float32 EndTangentWeight;
+    RadientMath::GetCubicHermiteWeights(
+        0.25f,
+        4.f,
+        StartValueWeight,
+        StartTangentWeight,
+        EndValueWeight,
+        EndTangentWeight);
+
+    EXPECT_FLOAT_EQ(StartValueWeight, 27.f / 32.f);
+    EXPECT_FLOAT_EQ(StartTangentWeight, 9.f / 16.f);
+    EXPECT_FLOAT_EQ(EndValueWeight, 5.f / 32.f);
+    EXPECT_FLOAT_EQ(EndTangentWeight, -3.f / 16.f);
+}
+
+TEST(RadientMathTest, CubicHermiteInterpolatesFloat2AndFloat4ComponentWise)
+{
+    const RadientFloat2 Float2Value = RadientMath::CubicHermite(
+        RadientFloat2{0.f, 4.f},
+        RadientFloat2{2.f, -2.f},
+        RadientFloat2{4.f, 8.f},
+        RadientFloat2{-2.f, 2.f},
+        0.5f,
+        2.f);
+    EXPECT_FLOAT_EQ(Float2Value.x, 3.f);
+    EXPECT_FLOAT_EQ(Float2Value.y, 5.f);
+
+    const RadientFloat4 Float4Value = RadientMath::CubicHermite(
+        RadientFloat4{0.f, 2.f, 4.f, 6.f},
+        RadientFloat4{0.f, 2.f, 0.f, -2.f},
+        RadientFloat4{2.f, 4.f, 6.f, 8.f},
+        RadientFloat4{0.f, -2.f, 0.f, 2.f},
+        0.5f,
+        2.f);
+    EXPECT_FLOAT_EQ(Float4Value.x, 1.f);
+    EXPECT_FLOAT_EQ(Float4Value.y, 4.f);
+    EXPECT_FLOAT_EQ(Float4Value.z, 5.f);
+    EXPECT_FLOAT_EQ(Float4Value.w, 6.f);
+}
+
+TEST(RadientMathTest, RoundTripsMatrixType)
+{
+    // Matrix layout conversion should be lossless in both directions.
+    const float4x4 Source{
+        1.f, 2.f, 3.f, 4.f,
+        5.f, 6.f, 7.f, 8.f,
+        9.f, 10.f, 11.f, 12.f,
+        13.f, 14.f, 15.f, 16.f};
+
+    const RadientMatrix4x4 RadientMatrix = RadientMath::ToRadientMatrix(Source);
+    const float4x4         RoundTrip     = RadientMath::ToFloat4x4(RadientMatrix);
+
+    // Every element should survive the round trip unchanged.
+    for (Uint32 i = 0; i < 16; ++i)
+        EXPECT_EQ(RoundTrip.Data()[i], Source.Data()[i]);
+}
+
+TEST(RadientMathTest, MultipliesMatrices)
+{
+    const RadientMatrix4x4 A{
+        1.f, 2.f, 3.f, 4.f,
+        5.f, 6.f, 7.f, 8.f,
+        9.f, 10.f, 11.f, 12.f,
+        13.f, 14.f, 15.f, 16.f};
+
+    const RadientMatrix4x4 B{
+        17.f, 18.f, 19.f, 20.f,
+        21.f, 22.f, 23.f, 24.f,
+        25.f, 26.f, 27.f, 28.f,
+        29.f, 30.f, 31.f, 32.f};
+
+    const RadientMatrix4x4 Matrix = RadientMath::MultiplyMatrices(A, B);
+    const RadientMatrix4x4 Reference{
+        250.f, 260.f, 270.f, 280.f,
+        618.f, 644.f, 670.f, 696.f,
+        986.f, 1028.f, 1070.f, 1112.f,
+        1354.f, 1412.f, 1470.f, 1528.f};
+    EXPECT_EQ(Matrix, Reference);
+}
+
+TEST(RadientMathTest, TransposesMatrix)
+{
+    const RadientMatrix4x4 Matrix{
+        1.f, 2.f, 3.f, 4.f,
+        5.f, 6.f, 7.f, 8.f,
+        9.f, 10.f, 11.f, 12.f,
+        13.f, 14.f, 15.f, 16.f};
+
+    const RadientMatrix4x4 Reference{
+        1.f, 5.f, 9.f, 13.f,
+        2.f, 6.f, 10.f, 14.f,
+        3.f, 7.f, 11.f, 15.f,
+        4.f, 8.f, 12.f, 16.f};
+    EXPECT_EQ(RadientMath::TransposeMatrix(Matrix), Reference);
+}
+
+TEST(RadientMathTest, BuildsTransformMatrixWithPositionOnly)
+{
+    // Position-only transforms should produce a translation matrix.
+    RadientTransform Transform;
+    Transform.Position = {1.f, 2.f, 3.f};
+    Transform.Scale    = {1.f, 1.f, 1.f};
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+    const RadientMatrix4x4 Reference{
+        1.f, 0.f, 0.f, 0.f,
+        0.f, 1.f, 0.f, 0.f,
+        0.f, 0.f, 1.f, 0.f,
+        1.f, 2.f, 3.f, 1.f};
+    // With row-vector math, translation lives in the last row.
+    EXPECT_EQ(Matrix, Reference);
+}
+
+TEST(RadientMathTest, BuildsTransformMatrixWithScaleOnly)
+{
+    // Scale-only transforms should place scale on the diagonal.
+    RadientTransform Transform;
+    Transform.Scale = {2.f, 3.f, 4.f};
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+    const RadientMatrix4x4 Reference{
+        2.f, 0.f, 0.f, 0.f,
+        0.f, 3.f, 0.f, 0.f,
+        0.f, 0.f, 4.f, 0.f,
+        0.f, 0.f, 0.f, 1.f};
+    // No translation or rotation should be introduced.
+    EXPECT_EQ(Matrix, Reference);
+}
+
+TEST(RadientMathTest, BuildsTransformMatrixWithRotationOnly)
+{
+    // A unit Z rotation quaternion should rotate X into +Y.
+    RadientTransform Transform;
+    Transform.Scale      = {1.f, 1.f, 1.f};
+    Transform.Rotation.z = 0.70710678f;
+    Transform.Rotation.w = 0.70710678f;
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+    const RadientMatrix4x4 Reference{
+        0.f, 1.f, 0.f, 0.f,
+        -1.f, 0.f, 0.f, 0.f,
+        0.f, 0.f, 1.f, 0.f,
+        0.f, 0.f, 0.f, 1.f};
+    // Quaternion conversion may introduce tiny floating-point differences.
+    ExpectMatrixNear(Matrix, Reference);
+}
+
+TEST(RadientMathTest, BuildsTransformMatrixWithScaleAndPosition)
+{
+    // Scale and translation should compose without cross-contaminating each
+    // other when there is no rotation.
+    RadientTransform Transform;
+    Transform.Position = {1.f, 2.f, 3.f};
+    Transform.Scale    = {2.f, 3.f, 4.f};
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+    const RadientMatrix4x4 Reference{
+        2.f, 0.f, 0.f, 0.f,
+        0.f, 3.f, 0.f, 0.f,
+        0.f, 0.f, 4.f, 0.f,
+        1.f, 2.f, 3.f, 1.f};
+    // Scale stays on the diagonal and translation stays in the last row.
+    EXPECT_EQ(Matrix, Reference);
+}
+
+TEST(RadientMathTest, BuildsTransformMatrixWithScaleRotationAndPosition)
+{
+    // Full TRS composition should apply local scale, then rotation, then translation.
+    RadientTransform Transform;
+    Transform.Position   = {1.f, 2.f, 3.f};
+    Transform.Scale      = {2.f, 3.f, 4.f};
+    Transform.Rotation.z = 0.70710678f;
+    Transform.Rotation.w = 0.70710678f;
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+    const RadientMatrix4x4 Reference{
+        0.f, 2.f, 0.f, 0.f,
+        -3.f, 0.f, 0.f, 0.f,
+        0.f, 0.f, 4.f, 0.f,
+        1.f, 2.f, 3.f, 1.f};
+    // The expected matrix verifies both non-uniform scale and the rotated axes.
+    ExpectMatrixNear(Matrix, Reference);
+}
+
+TEST(RadientMathTest, InvertsTransformMatrix)
+{
+    // A non-singular TRS matrix should produce an inverse that multiplies back
+    // to identity.
+    RadientTransform Transform;
+    Transform.Position   = {1.f, 2.f, 3.f};
+    Transform.Scale      = {2.f, 3.f, 4.f};
+    Transform.Rotation.z = 0.70710678f;
+    Transform.Rotation.w = 0.70710678f;
+
+    const RadientMatrix4x4 Matrix = RadientMath::TransformToMatrix(Transform);
+
+    RadientMatrix4x4 Inverse;
+    EXPECT_TRUE(RadientMath::TryInverseMatrix(Matrix, Inverse));
+
+    const RadientMatrix4x4 Identity = RadientMath::MultiplyMatrices(Matrix, Inverse);
+    const RadientMatrix4x4 Reference{
+        1.f, 0.f, 0.f, 0.f,
+        0.f, 1.f, 0.f, 0.f,
+        0.f, 0.f, 1.f, 0.f,
+        0.f, 0.f, 0.f, 1.f};
+    // Matrix * inverse should be identity within numerical tolerance.
+    ExpectMatrixNear(Identity, Reference);
+}
+
+TEST(RadientMathTest, RejectsSingularMatrixInverse)
+{
+    // Zero scale makes the transform singular, so inversion must fail.
+    RadientTransform Transform;
+    Transform.Scale = {0.f, 1.f, 1.f};
+
+    RadientMatrix4x4 Inverse;
+    EXPECT_FALSE(RadientMath::TryInverseMatrix(RadientMath::TransformToMatrix(Transform), Inverse));
+}
+
+TEST(RadientMathTest, DecomposesTransformMatrix)
+{
+    // Matrix decomposition should recover the original representable TRS values.
+    RadientTransform Transform;
+    Transform.Position   = {1.f, 2.f, 3.f};
+    Transform.Scale      = {2.f, 3.f, 4.f};
+    Transform.Rotation.z = 0.70710678f;
+    Transform.Rotation.w = 0.70710678f;
+
+    const RadientTransform Decomposed = RadientMath::MatrixToTransform(RadientMath::TransformToMatrix(Transform));
+    // Position, scale, and quaternion should round-trip within tolerance.
+    ExpectFloat3Near(Decomposed.Position, Transform.Position);
+    ExpectFloat3Near(Decomposed.Scale, Transform.Scale);
+    ExpectRotationNear(Decomposed.Rotation, Transform.Rotation);
+}
+
+TEST(RadientMathTest, DecomposesZeroScaleTransformMatrix)
+{
+    // Degenerate TRS decompositions are not unique. Reconstruct the matrix
+    // instead of requiring the original quaternion or scale signs.
+    const RadientFloat3 Scales[] = {
+        {0.f, 1.f, 1.f},
+        {1.f, 0.f, 1.f},
+        {1.f, 1.f, 0.f},
+        {1.f, 0.f, 0.f},
+        {0.f, 1.f, 0.f},
+        {0.f, 0.f, 1.f},
+        {0.f, 0.f, 0.f},
+        {0.f, -2.f, 3.f},
+        {0.f, 0.f, -4.f},
+    };
+    for (const RadientFloat3& Scale : Scales)
+    {
+        SCOPED_TRACE(::testing::Message{} << "Scale: " << Scale.x << ", " << Scale.y << ", " << Scale.z);
+        RadientTransform Transform;
+        Transform.Position   = {1.f, 2.f, 3.f};
+        Transform.Rotation.z = 0.70710678f;
+        Transform.Rotation.w = 0.70710678f;
+        Transform.Scale      = Scale;
+
+        const RadientMatrix4x4 Matrix     = RadientMath::TransformToMatrix(Transform);
+        const RadientTransform Decomposed = RadientMath::MatrixToTransform(Matrix);
+        ExpectMatrixNear(RadientMath::TransformToMatrix(Decomposed), Matrix);
+    }
+}
+
+} // namespace

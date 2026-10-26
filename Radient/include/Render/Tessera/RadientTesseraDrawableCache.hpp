@@ -1,0 +1,471 @@
+/*
+ *  Copyright 2026 Diligent Graphics LLC
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ *
+ *  In no event and under no legal theory, whether in tort (including negligence),
+ *  contract, or otherwise, unless required by applicable law (such as deliberate
+ *  and grossly negligent acts) or agreed to in writing, shall any Contributor be
+ *  liable for any damages, including any direct, indirect, special, incidental,
+ *  or consequential damages of any character arising as a result of this License or
+ *  out of the use or inability to use the software (including but not limited to damages
+ *  for loss of goodwill, work stoppage, computer failure or malfunction, or any and
+ *  all other commercial damages or losses), even if such Contributor has been advised
+ *  of the possibility of such damages.
+ */
+
+#pragma once
+
+#include "Render/RadientDrawableMesh.hpp"
+#include "Render/RadientDrawList.hpp"
+#include "Render/RadientLightList.hpp"
+#include "Render/Tessera/RadientTesseraMaterialCache.hpp"
+#include "Render/Tessera/RadientTesseraMorphData.hpp"
+#include "Render/Tessera/RadientTesseraSkinData.hpp"
+#include "RadientScene.h"
+#include "Scene/RadientSceneState.hpp"
+
+#include "RefCntAutoPtr.hpp"
+
+#ifdef _MSC_VER
+#    pragma warning(push)
+#    pragma warning(disable : 4244) // 'argument': conversion from 'int' to 'unsigned char', possible loss of data
+#endif
+#include "absl/container/flat_hash_map.h"
+#ifdef _MSC_VER
+#    pragma warning(pop)
+#endif
+
+#include <deque>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace Diligent
+{
+
+struct IThreadPool;
+
+/// Per-sync services used to resolve Tessera-specific material data. A null
+/// material cache means renderer material resources are not initialized yet.
+struct RadientTesseraMaterialResolveContext
+{
+    IThreadPool&                 ThreadPool;
+    RadientTesseraMaterialCache* pMaterialCache = nullptr;
+};
+
+/// Per-renderable binding between a shared skin/pose palette and the space in
+/// which that skeleton is attached to the mesh.
+struct RadientTesseraSkinAttachment
+{
+    static constexpr size_t InvalidCacheEntryAttachmentIndex = ~size_t{0};
+
+    RadientTesseraSkinData&         SkinData;
+    const Bool*                     pEffectiveVisible         = nullptr;
+    size_t                          CacheEntryAttachmentIndex = InvalidCacheEntryAttachmentIndex;
+    std::optional<RadientMatrix4x4> SkeletonToMeshTransform   = {};
+};
+
+/// Renderer-facing primitive slot addressed by a stable drawable ID.
+///
+/// A slot represents one renderable primitive, not the whole mesh component. It owns the
+/// primitive draw range and resolved material pointers, and references mutable scene state
+/// such as renderer component, world matrix, and effective visibility. Draw lists store only
+/// the slot ID, so they can be sorted or filtered without moving this data.
+struct RadientDrawableSlot
+{
+    static constexpr size_t InvalidDrawListIndex = ~size_t{0};
+
+    RadientEntityID Entity = InvalidRadientEntityID;
+
+    Uint32                   Generation = 0;
+    bool                     IsIndexed  = false;
+    PBR_Renderer::ALPHA_MODE AlphaMode  = PBR_Renderer::ALPHA_MODE_OPAQUE;
+
+    const RadientMeshRendererComponent* pRenderer         = nullptr;
+    const RadientMatrix4x4*             pWorldMatrix      = nullptr;
+    const Bool*                         pEffectiveVisible = nullptr;
+    RadientTesseraSkinAttachment*       pSkinAttachment   = nullptr;
+    RadientTesseraMorphAttachment*      pMorphAttachment  = nullptr;
+
+    // RenderableRecord keeps the mesh payload and deformation attachments
+    // alive. The deformation caches own shared palette data, while
+    // MaterialData retains renderer-specific material state and its asset.
+    RadientTesseraMaterialDataMap::ValueHandle MaterialData;
+
+    IVertexPool*         pVertexPool      = nullptr;
+    IBufferSuballocator* pIndexAllocator  = nullptr;
+    Uint32               VertexBufferMask = 0;
+
+    PBR_Renderer::PSO_FLAGS VertexAttribFlags = PBR_Renderer::PSO_FLAG_NONE;
+
+    VALUE_TYPE IndexType          = VT_UNDEFINED;
+    Uint32     FirstIndexLocation = 0;
+    Uint32     BaseVertex         = 0;
+    Uint32     FirstElement       = 0;
+    Uint32     ElementCount       = 0;
+
+    size_t DrawListIndex = InvalidDrawListIndex;
+
+    // Position in the material's dependent drawable list, for constant-time removal.
+    size_t MaterialDrawableIndex = ~size_t{0};
+
+    bool IsValid() const
+    {
+        return Entity != InvalidRadientEntityID;
+    }
+
+    bool IsInDrawList() const
+    {
+        return DrawListIndex != InvalidDrawListIndex;
+    }
+};
+
+enum class RadientDrawableChangeType
+{
+    Added,
+    Removed,
+    Updated
+};
+
+struct RadientDrawableChange
+{
+    RadientDrawableID         DrawableID = InvalidRadientDrawableID;
+    RadientDrawableChangeType Type       = RadientDrawableChangeType::Updated;
+};
+
+enum class RadientLightChangeType
+{
+    Added,
+    Removed,
+    Updated
+};
+
+struct RadientLightChange
+{
+    RadientEntityID        Entity = InvalidRadientEntityID;
+    RADIENT_LIGHT_TYPE     Type   = RADIENT_LIGHT_TYPE_DIRECTIONAL;
+    RadientLightChangeType Change = RadientLightChangeType::Updated;
+};
+
+/// Source of renderer-ready mesh data for RadientTesseraDrawableCache.
+///
+/// Production code resolves assets through the asset manager. Tests can provide a lightweight
+/// fake provider without constructing the real asset-loading stack.
+class IRadientDrawableMeshProvider
+{
+public:
+    virtual ~IRadientDrawableMeshProvider() = default;
+
+    virtual RadientDrawableMeshResolveResult GetDrawableMesh(IRadientMeshAsset* pMesh) = 0;
+};
+
+// RadientTesseraDrawableCache is the bridge between scene-state components and renderer-facing
+// draw/light lists. It owns stable drawable slots and keeps the lightweight lists in sync
+// incrementally from RadientSceneState changes.
+//
+//      IRadientScene / RadientSceneState
+//          |
+//          |  EnumerateRenderableMeshChanges()
+//          v
+//      m_Renderables[Entity] --------------------------+
+//          |                                           |
+//          |  IRadientDrawableMeshProvider             |
+//          |  resolves RadientMesh -> RadientDrawableMesh
+//          v                                           |
+//      m_DrawableSlots[DrawableID] <-------------------+
+//          |
+//          +--> m_DrawLists[AlphaMode] -> RadientDrawItem{DrawableID}
+//          |
+//          +--> m_DrawableChanges     -> Added/Updated/Removed DrawableID
+//
+//      IRadientScene / RadientSceneState
+//          |
+//          |  EnumerateRenderableLightChanges()
+//          v
+//      m_Lights[Entity] -> light-list location
+//          |
+//          +--> m_LightLists[LightType] -> RadientLightItem{component/world/visibility refs}
+//          |
+//          +--> m_LightChanges          -> Added/Updated/Removed light entity
+//
+// Render passes consume draw/light lists. Heavy per-drawable data is reached through
+// DrawableID -> RadientDrawableSlot, while draw lists stay compact and cheap to sort or filter.
+// Scene revisions decide when to synchronize; pending renderables are retried until mesh data
+// becomes ready.
+
+/// Converts Radient scene state into renderer-facing render data.
+class RadientTesseraDrawableCache
+{
+public:
+    explicit RadientTesseraDrawableCache(
+        RadientTesseraBufferSuballocator& JointBuffer,
+        IRadientDrawableMeshProvider*     pMeshProvider             = nullptr,
+        Uint32                            MaxActiveMorphTargetCount = 4);
+
+    RADIENT_STATUS SyncScene(
+        const IRadientScene&                        Scene,
+        const RadientTesseraMaterialResolveContext& MaterialResolveContext);
+
+    /// Applies cached material render-state changes to dependent drawables. Call
+    /// after material preparation and before preparing geometry passes. Changes
+    /// are appended to the scene-sync deltas; each scene tracks its own revision.
+    RADIENT_STATUS SyncMaterialState(const RadientTesseraMaterialCache& MaterialCache);
+
+    const RadientDrawLists& GetDrawLists() const
+    {
+        return m_DrawLists;
+    }
+
+    const RadientDrawList& GetDrawList(PBR_Renderer::ALPHA_MODE AlphaMode) const
+    {
+        return m_DrawLists.GetDrawList(AlphaMode);
+    }
+
+    const std::vector<RadientDrawableChange>& GetDrawableChanges() const
+    {
+        return m_DrawableChanges;
+    }
+
+    const RadientLightLists& GetLightList() const
+    {
+        return m_LightLists;
+    }
+
+    const RadientLightList& GetLightList(RADIENT_LIGHT_TYPE Type) const
+    {
+        return m_LightLists.GetLightList(Type);
+    }
+
+    const std::vector<RadientLightChange>& GetLightChanges() const
+    {
+        return m_LightChanges;
+    }
+
+    const RadientSceneRevisions& GetSceneRevisions() const
+    {
+        return m_SceneRevisions;
+    }
+
+    bool HasPendingRenderables() const
+    {
+        return !m_PendingRenderableEntities.empty();
+    }
+
+    /// Updates the shared joint-buffer shadow for every visible unique skin and
+    /// pose pair whose pose version changed. Each pair is prepared once
+    /// regardless of how many renderables or primitive slots reference it.
+    /// RenderFrameID keeps repeated preparation during the same renderer frame
+    /// from advancing motion history.
+    RADIENT_STATUS PrepareSkinningData(RadientFrameID RenderFrameID, bool PackMatrixRowMajor = true);
+
+    /// Selects active morph targets for every visible unique weights object
+    /// and prepares the shader palettes for all its morph geometries together.
+    /// Direct weight edits are detected through the weights object's version
+    /// and do not require scene synchronization.
+    RADIENT_STATUS PrepareMorphTargetData(RadientFrameID RenderFrameID);
+
+    const RadientDrawableSlot* GetDrawableSlot(RadientDrawableID DrawableID) const
+    {
+        if (DrawableID >= m_DrawableSlots.size())
+        {
+            UNEXPECTED("Invalid drawable ID ", DrawableID);
+            return nullptr;
+        }
+
+        const RadientDrawableSlot& Slot = m_DrawableSlots[DrawableID];
+        VERIFY(Slot.IsValid(), "Drawable ID ", DrawableID, " is not valid");
+        return Slot.IsValid() ? &Slot : nullptr;
+    }
+
+private:
+    struct RenderableMorphState
+    {
+        static constexpr size_t InvalidCacheEntryIndex = ~size_t{0};
+
+        RadientTesseraMorphData& MorphData;
+        const Bool*              pEffectiveVisible = nullptr;
+        size_t                   CacheEntryIndex   = InvalidCacheEntryIndex;
+
+        // Indexed by mesh geometry. Created once on drawable resolution;
+        // geometries without morph streams have no attachment.
+        std::vector<std::optional<RadientTesseraMorphAttachment>> GeometryAttachments = {};
+    };
+
+    struct RenderableRecord
+    {
+        // Strong mesh asset reference kept while pending or expanded drawables still depend on it.
+        RefCntAutoPtr<IRadientMeshAsset> pMesh;
+
+        // Scene-state references refreshed by renderable change synchronization.
+        const RadientMeshRendererComponent* pRenderer         = nullptr;
+        const RadientMatrix4x4*             pWorldMatrix      = nullptr;
+        const Bool*                         pEffectiveVisible = nullptr;
+
+        // Retain the requested weights while morph setup waits for mesh resolution.
+        RefCntAutoPtr<IRadientMorphTargetWeights> pMorphWeights;
+
+        // Allocated only for skinned renderables. The attachment points to
+        // shared palette data and stores the per-renderable space correction.
+        std::unique_ptr<RadientTesseraSkinAttachment> pSkinAttachment;
+
+        // Allocated only after the mesh resolves, when morph rendering is enabled
+        // and the entity has a morph component. Palettes are shared by weights.
+        std::unique_ptr<RenderableMorphState> pMorphState;
+
+        // True while this entity is waiting for its mesh asset to become drawable.
+        bool PendingResolution = false;
+
+        // Drawable IDs produced from this renderable's mesh primitives.
+        std::vector<RadientDrawableID> DrawableIDs;
+    };
+
+    struct SkinDataKey
+    {
+        // Skin and pose are retained by the cache entry, so the raw pointers are stable
+        IRadientSkinAsset*    pSkin = nullptr;
+        IRadientSkeletonPose* pPose = nullptr;
+
+        bool operator==(const SkinDataKey& Rhs) const noexcept
+        {
+            return pSkin == Rhs.pSkin && pPose == Rhs.pPose;
+        }
+
+        struct Hasher
+        {
+            size_t operator()(const SkinDataKey& Key) const noexcept;
+        };
+    };
+
+    struct SkinDataCacheEntry
+    {
+        std::unique_ptr<RadientTesseraSkinData>    pSkinData;
+        std::vector<RadientTesseraSkinAttachment*> Attachments;
+    };
+
+    struct MorphDataCacheEntry
+    {
+        std::unique_ptr<RadientTesseraMorphData> pMorphData;
+        // One visibility association per entity, independent of geometry count.
+        std::vector<RenderableMorphState*> Renderables;
+    };
+
+    struct MaterialDrawables
+    {
+        Uint64                         RenderStateRevision = 0;
+        std::vector<RadientDrawableID> DrawableIDs;
+    };
+
+    struct LightListLocation
+    {
+        RADIENT_LIGHT_TYPE Type  = RADIENT_LIGHT_TYPE_DIRECTIONAL;
+        size_t             Index = 0;
+    };
+
+    void ProcessRenderableMeshAddedOrUpdated(
+        const RadientSceneState::RenderableMesh&    Mesh,
+        const RadientTesseraMaterialResolveContext& MaterialResolveContext);
+    void ProcessRenderableMeshRemoved(RadientEntityID Entity);
+    void ResolvePendingRenderableMeshes(
+        const RadientTesseraMaterialResolveContext& MaterialResolveContext);
+
+    void UpdateRenderableSkin(RenderableRecord&           Record,
+                              const RadientSkinComponent* pSkin);
+
+    void RemoveRenderableSkin(RenderableRecord& Record);
+
+    void InitializeRenderableMorph(RenderableRecord& Record, const RadientDrawableMesh& Mesh);
+
+    void RemoveRenderableMorph(RenderableRecord& Record);
+
+    void RebuildVisibleDeformationDataLists();
+
+    void ProcessRenderableLightAddedOrUpdated(const RadientSceneState::RenderableLight& Light);
+    void ProcessRenderableLightRemoved(RadientEntityID Entity);
+
+    bool TryExpandRenderable(
+        RadientEntityID                             Entity,
+        RenderableRecord&                           Record,
+        const RadientTesseraMaterialResolveContext& MaterialResolveContext);
+
+    RadientDrawableID AllocateDrawableID();
+
+    void FreeDrawableID(RadientDrawableID DrawableID);
+    void RemoveDrawableFromDrawList(RadientDrawableID DrawableID);
+    void AttachDrawableMaterial(RadientDrawableID DrawableID);
+    void DetachDrawableMaterial(RadientDrawableID DrawableID);
+    void RemoveRenderableDrawables(RenderableRecord& Record);
+    void AddPendingResolution(RadientEntityID Entity, RenderableRecord& Record);
+    void RecordDrawableChange(RadientDrawableID DrawableID, RadientDrawableChangeType Type);
+
+    void RemoveLightFromList(RadientEntityID Entity, const LightListLocation& Location);
+    void RecordLightChange(RadientEntityID Entity, RADIENT_LIGHT_TYPE Type, RadientLightChangeType Change);
+
+private:
+    IRadientDrawableMeshProvider& m_MeshProvider;
+
+    RadientTesseraBufferSuballocator& m_JointBuffer;
+    Uint32                            m_MaxActiveMorphTargetCount = 0;
+
+    using RenderableMap = std::unordered_map<RadientEntityID, RenderableRecord>;
+    using LightMap      = std::unordered_map<RadientEntityID, LightListLocation>;
+    RenderableMap m_Renderables;
+    LightMap      m_Lights;
+
+    // One palette allocation per retained skin/pose pair. Entries own strong
+    // skin and pose references through pSkinData, so their raw-pointer keys
+    // cannot be reused while present. Heap allocation keeps drawable pointers
+    // stable when the flat hash map rehashes.
+    using SkinDataCache = absl::flat_hash_map<SkinDataKey, SkinDataCacheEntry, SkinDataKey::Hasher>;
+    SkinDataCache m_SkinDataCache;
+
+    // One active-palette history per retained weights object. The entry owns a
+    // strong weights reference through pMorphData, keeping raw-pointer keys
+    // stable while they are present in the cache.
+    using MorphDataCache = absl::flat_hash_map<IRadientMorphTargetWeights*, MorphDataCacheEntry>;
+    MorphDataCache m_MorphDataCache;
+
+    // Rebuilt only when drawable attachments or effective visibility change.
+    // Frame preparation touches no completely hidden skin/pose pairs or morph weights.
+    std::vector<RadientTesseraSkinData*>  m_VisibleSkinData;
+    std::vector<RadientTesseraMorphData*> m_VisibleMorphData;
+
+    // Renderer-specific material data is retained only while an entity waits
+    // for all of its primitive materials to become GPU-ready.
+    using PendingMaterialDataMap =
+        absl::flat_hash_map<RadientEntityID, std::vector<RadientTesseraMaterialDataMap::ValueHandle>>;
+    PendingMaterialDataMap m_PendingMaterialData;
+
+    // Drawable slots retain the material data used as keys. Remove each entry
+    // when its last drawable disappears, before releasing the slot's reference.
+    using MaterialDrawablesMap = absl::flat_hash_map<const RadientTesseraMaterialData*, MaterialDrawables>;
+    MaterialDrawablesMap m_MaterialDrawables;
+    Uint64               m_MaterialRenderStateRevision = 0;
+
+    // Geometry passes cache pointers to drawable slots; deque keeps existing slot
+    // addresses stable when new drawable IDs append more slots.
+    std::deque<RadientDrawableSlot>    m_DrawableSlots;
+    std::vector<RadientDrawableID>     m_FreeDrawableIDs;
+    std::vector<RadientEntityID>       m_PendingRenderableEntities;
+    std::vector<RadientEntityID>       m_PendingRenderableEntitiesScratch;
+    std::vector<RadientDrawableChange> m_DrawableChanges;
+    std::vector<RadientLightChange>    m_LightChanges;
+
+    RadientDrawLists      m_DrawLists;
+    RadientLightLists     m_LightLists;
+    RadientSceneRevisions m_SceneRevisions;
+};
+
+} // namespace Diligent

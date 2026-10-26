@@ -189,8 +189,15 @@ float3 PerturbNormal(PerturbNormalInfo NormalInfo,
 {
     if (HasUV)
     {
-        TSNormal.xy *= NormalInfo.Face;
-        return TransformTangentSpaceNormalGrad(NormalInfo.dPos_dx, NormalInfo.dPos_dy, dUV_dx, dUV_dy, NormalInfo.Normal, TSNormal);
+        // Build the tangent frame for the original surface orientation, then
+        // negate the complete transformed normal when rendering the back face.
+        float3 SurfaceNormal = NormalInfo.Normal * NormalInfo.Face;
+        return TransformTangentSpaceNormalGrad(NormalInfo.dPos_dx,
+                                               NormalInfo.dPos_dy,
+                                               dUV_dx,
+                                               dUV_dy,
+                                               SurfaceNormal,
+                                               TSNormal) * NormalInfo.Face;
     }
     else
     {
@@ -219,6 +226,8 @@ float3 SamplePrefilteredEnvMap(in TextureCube  PrefilteredEnvMap,
 
 struct IBLSamplingInfo
 {
+    // Geometric directions remain in world space. Environment orientation is
+    // applied separately to the direction passed to an environment-map sample.
     float3 N;
     float3 V;
     float3 L;
@@ -232,10 +241,6 @@ struct IBLSamplingInfo
 IBLSamplingInfo GetIBLSamplingInfo(in SurfaceReflectanceInfo SrfInfo,
                                    in Texture2D    PreintegratedBRDF,
                                    in SamplerState PreintegratedBRDF_sampler,
-#if ENABLE_IRIDESCENCE
-                                   in float3       IridescenceFresnel,
-                                   in float        IridescenceFactor,
-#endif
                                    in float3       N,
                                    in float3       V)
 {
@@ -258,7 +263,7 @@ IBLSamplingInfo GetIBLSamplingInfo(in SurfaceReflectanceInfo SrfInfo,
         Info.k_S = SchlickReflection(Info.NdotV, SrfInfo.Reflectance0, Reflectance90);
 #       if ENABLE_IRIDESCENCE
         {
-            Info.k_S = lerp(Info.k_S, IridescenceFresnel, IridescenceFactor);
+            Info.k_S = lerp(Info.k_S, SrfInfo.IridescenceFresnel, SrfInfo.IridescenceFactor);
         }
 #       endif
     }
@@ -298,28 +303,36 @@ float3 GetSpecularIBL_GGX(in SurfaceReflectanceInfo SrfInfo,
     // https://bruop.github.io/ibl/#single_scattering_results
     return SpecularLight * (IBLInfo.k_S * IBLInfo.PreIntBRDF.x + IBLInfo.PreIntBRDF.y);
 #else
-    return SpecularLight * (SrfInfo.Reflectance0 * IBLInfo.PreIntBRDF.x + SrfInfo.Reflectance90 * IBLInfo.PreIntBRDF.y);
+    float3 SpecularIBL = SpecularLight * (SrfInfo.Reflectance0 * IBLInfo.PreIntBRDF.x + SrfInfo.Reflectance90 * IBLInfo.PreIntBRDF.y);
+#   if ENABLE_IRIDESCENCE
+    SpecularIBL = lerp(SpecularIBL, SpecularLight * SrfInfo.IridescenceFresnel, SrfInfo.IridescenceFactor);
+#   endif
+    return SpecularIBL;
 #endif
 }
 
 // Specular component of the image-based light (IBL) using the split-sum approximation.
 float3 GetSpecularIBL_GGX(in SurfaceReflectanceInfo SrfInfo,
                           in IBLSamplingInfo        IBLInfo,
+                          in float2                 EnvironmentRotation,
                           in TextureCube            PrefilteredEnvMap,
                           in SamplerState           PrefilteredEnvMap_sampler,
                           in float                  PrefilteredEnvMapLastMip)
 {
-    float  lod = SrfInfo.PerceptualRoughness * PrefilteredEnvMapLastMip;
-    float3 SpecularLight = SamplePrefilteredEnvMap(PrefilteredEnvMap, PrefilteredEnvMap_sampler, IBLInfo.L, lod);
+    float  lod                  = SrfInfo.PerceptualRoughness * PrefilteredEnvMapLastMip;
+    float3 EnvironmentDirection = RotateDirectionAroundY(IBLInfo.L, EnvironmentRotation);
+    float3 SpecularLight        = SamplePrefilteredEnvMap(PrefilteredEnvMap, PrefilteredEnvMap_sampler, EnvironmentDirection, lod);
     return GetSpecularIBL_GGX(SrfInfo, IBLInfo, SpecularLight);
 }
 
 float3 GetLambertianIBL(in SurfaceReflectanceInfo SrfInfo,
                         in IBLSamplingInfo        IBLInfo,
+                        in float2                 EnvironmentRotation,
                         in TextureCube            IrradianceMap,
                         in SamplerState           IrradianceMap_sampler)
-{    
-    float3 Irradiance = IrradianceMap.Sample(IrradianceMap_sampler, IBLInfo.N).rgb;
+{
+    float3 EnvironmentDirection = RotateDirectionAroundY(IBLInfo.N, EnvironmentRotation);
+    float3 Irradiance           = IrradianceMap.Sample(IrradianceMap_sampler, EnvironmentDirection).rgb;
 #if !USE_HDR_IBL_CUBEMAPS
     Irradiance = TO_LINEAR(Irradiance);
 #endif
@@ -344,25 +357,44 @@ float3 GetLambertianIBL(in SurfaceReflectanceInfo SrfInfo,
 #endif
 }
 
+float SamplePreintegratedSheenBRDF(in Texture2D    PreintegratedSheen,
+                                    in SamplerState PreintegratedSheen_sampler,
+                                    in float        NdotV,
+                                    in float        SheenRoughness)
+{
+    // At zero roughness, Charlie converges to an infinitely narrow grazing
+    // lobe that a finite rasterized lookup table cannot represent.
+    float BRDF = 0.0;
+    if (SheenRoughness > 0.0)
+        BRDF = PreintegratedSheen.Sample(PreintegratedSheen_sampler, float2(NdotV, SheenRoughness)).r;
+    return BRDF;
+}
+
 float3 GetSpecularIBL_Charlie(in float3       SheenColor,
                               in float        SheenRoughness,
                               in float3       n,
                               in float3       v,
+                              in float2       EnvironmentRotation,
                               in float        PrefilteredCubeLastMip,
-                              in Texture2D    PreintegratedCharlie,
-                              in SamplerState PreintegratedCharlie_sampler,
-                              in TextureCube  PrefilteredEnvMap,
-                              in SamplerState PrefilteredEnvMap_sampler)
+                              in Texture2D    PreintegratedSheen,
+                              in SamplerState PreintegratedSheen_sampler,
+                              in TextureCube  PrefilteredSheenEnvMap,
+                              in SamplerState PrefilteredSheenEnvMap_sampler)
 {
-    float NdotV = dot_sat(n, v);
+    float3 SpecularIBL = float3(0.0, 0.0, 0.0);
+    if (SheenRoughness > 0.0)
+    {
+        float  NdotV               = dot_sat(n, v);
+        float  lod                 = SheenRoughness * PrefilteredCubeLastMip;
+        // The view-averaged Charlie map is indexed by the surface normal.
+        float3 EnvironmentDirection = RotateDirectionAroundY(n, EnvironmentRotation);
 
-    float  lod        = SheenRoughness * PrefilteredCubeLastMip;
-    float3 reflection = normalize(reflect(-v, n));
+        float brdf = SamplePreintegratedSheenBRDF(PreintegratedSheen, PreintegratedSheen_sampler, NdotV, SheenRoughness);
 
-    float  brdf = PreintegratedCharlie.Sample(PreintegratedCharlie_sampler, float2(NdotV, SheenRoughness)).r;
-
-    float3 SpecularLight = SamplePrefilteredEnvMap(PrefilteredEnvMap, PrefilteredEnvMap_sampler, reflection, lod);
-    return SpecularLight * SheenColor * brdf;
+        float3 SpecularLight = SamplePrefilteredEnvMap(PrefilteredSheenEnvMap, PrefilteredSheenEnvMap_sampler, EnvironmentDirection, lod);
+        SpecularIBL = SpecularLight * SheenColor * brdf;
+    }
+    return SpecularIBL;
 }
 
 
@@ -372,15 +404,20 @@ float3 GetSpecularIBL_Charlie(in float3       SheenColor,
 /// \param [in]  BaseColor    - Material base color.
 /// \param [in]  PhysicalDesc - Physical material description. For Metallic-roughness workflow,
 ///                             'g' channel stores roughness, 'b' channel stores metallic.
+/// \param [in]  DielectricSpecularColor  - Dielectric specular color multiplier.
+/// \param [in]  DielectricSpecularWeight - Dielectric specular weight.
 /// \param [out] Metallic     - Metallic value used for shading.
-SurfaceReflectanceInfo GetSurfaceReflectance(int       Workflow,
-                                             float4    BaseColor,
-                                             float4    PhysicalDesc,
+SurfaceReflectanceInfo GetSurfaceReflectance(int        Workflow,
+                                             float4     BaseColor,
+                                             float4     PhysicalDesc,
+                                             float3     DielectricSpecularColor,
+                                             float      DielectricSpecularWeight,
                                              out float Metallic)
 {
     SurfaceReflectanceInfo SrfInfo;
 
     float3 SpecularColor;
+    float3 Reflectance90;
 
     float3 f0 = float3(0.04, 0.04, 0.04);
 
@@ -399,6 +436,10 @@ SurfaceReflectanceInfo GetSurfaceReflectance(int       Workflow,
 
         // do conversion between metallic M-R and S-G metallic
         Metallic = SolveMetallic(BaseColor.rgb, SpecularColor, oneMinusSpecularStrength);
+
+        float MaxR0 = max(max(SpecularColor.r, SpecularColor.g), SpecularColor.b);
+        float R90   = clamp(MaxR0 * 50.0, 0.0, 1.0);
+        Reflectance90 = float3(R90, R90, R90);
     }
     else // if (Workflow == PBR_WORKFLOW_METALLIC_ROUGHNESS)
     {
@@ -407,25 +448,64 @@ SurfaceReflectanceInfo GetSurfaceReflectance(int       Workflow,
         SrfInfo.PerceptualRoughness = PhysicalDesc.g;
         Metallic                    = PhysicalDesc.b;
 
-        SrfInfo.DiffuseColor  = BaseColor.rgb * (float3(1.0, 1.0, 1.0) - f0) * (1.0 - Metallic);
-        SpecularColor         = lerp(f0, BaseColor.rgb, Metallic);
+        float3 DielectricF0    = min(f0 * DielectricSpecularColor, float3(1.0, 1.0, 1.0)) * DielectricSpecularWeight;
+        float  MaxDielectricF0 = max(max(DielectricF0.r, DielectricF0.g), DielectricF0.b);
+
+        SrfInfo.DiffuseColor = BaseColor.rgb * (1.0 - MaxDielectricF0) * (1.0 - Metallic);
+        SpecularColor        = lerp(DielectricF0, BaseColor.rgb, Metallic);
+        Reflectance90        = lerp(float3(DielectricSpecularWeight, DielectricSpecularWeight, DielectricSpecularWeight),
+                                   float3(1.0, 1.0, 1.0), Metallic);
     }
 
     SrfInfo.PerceptualRoughness = clamp(SrfInfo.PerceptualRoughness, 0.0, 1.0);
 
     // Compute reflectance.
-    float3 Reflectance0  = SpecularColor;
-    float  MaxR0         = max(max(Reflectance0.r, Reflectance0.g), Reflectance0.b);
-    // Anything less than 2% is physically impossible and is instead considered to be shadowing. Compare to "Real-Time-Rendering" 4th editon on page 325.
-    float R90 = clamp(MaxR0 * 50.0, 0.0, 1.0);
-
-    SrfInfo.Reflectance0  = Reflectance0;
-    SrfInfo.Reflectance90 = float3(R90, R90, R90);
+    SrfInfo.Reflectance0  = SpecularColor;
+    SrfInfo.Reflectance90 = Reflectance90;
+#if ENABLE_IRIDESCENCE
+    SrfInfo.IridescenceFresnel = float3(0.0, 0.0, 0.0);
+    SrfInfo.IridescenceFactor  = 0.0;
+#endif
 
     return SrfInfo;
 }
 
+SurfaceReflectanceInfo GetSurfaceReflectance(int       Workflow,
+                                             float4    BaseColor,
+                                             float4    PhysicalDesc,
+                                             out float Metallic)
+{
+    return GetSurfaceReflectance(Workflow, BaseColor, PhysicalDesc,
+                                 float3(1.0, 1.0, 1.0), 1.0, Metallic);
+}
+
 /// Calculates surface reflectance info for Metallic-roughness workflow
+SurfaceReflectanceInfo GetSurfaceReflectanceMR(float3 BaseColor,
+                                               float  Metallic,
+                                               float  Roughness,
+                                               float3 DielectricSpecularColor,
+                                               float  DielectricSpecularWeight)
+{
+    SurfaceReflectanceInfo SrfInfo;
+
+    float3 DielectricF0 = min(float3(0.04, 0.04, 0.04) * DielectricSpecularColor,
+                              float3(1.0, 1.0, 1.0)) * DielectricSpecularWeight;
+    float MaxDielectricF0 = max(max(DielectricF0.r, DielectricF0.g), DielectricF0.b);
+
+    SrfInfo.PerceptualRoughness = Roughness;
+    SrfInfo.DiffuseColor        = BaseColor * ((1.0 - MaxDielectricF0) * (1.0 - Metallic));
+
+    SrfInfo.Reflectance0  = lerp(DielectricF0, BaseColor, Metallic);
+    SrfInfo.Reflectance90 = lerp(float3(DielectricSpecularWeight, DielectricSpecularWeight, DielectricSpecularWeight),
+                                 float3(1.0, 1.0, 1.0), Metallic);
+#if ENABLE_IRIDESCENCE
+    SrfInfo.IridescenceFresnel = float3(0.0, 0.0, 0.0);
+    SrfInfo.IridescenceFactor  = 0.0;
+#endif
+
+    return SrfInfo;
+}
+
 SurfaceReflectanceInfo GetSurfaceReflectanceMR(float3 BaseColor,
                                                float  Metallic,
                                                float  Roughness)
@@ -444,6 +524,10 @@ SurfaceReflectanceInfo GetSurfaceReflectanceMR(float3 BaseColor,
 
     SrfInfo.Reflectance0  = Reflectance0;
     SrfInfo.Reflectance90 = float3(R90, R90, R90);
+#if ENABLE_IRIDESCENCE
+    SrfInfo.IridescenceFresnel = float3(0.0, 0.0, 0.0);
+    SrfInfo.IridescenceFactor  = 0.0;
+#endif
 
     return SrfInfo;
 }
@@ -462,6 +546,10 @@ SurfaceReflectanceInfo GetSurfaceReflectanceClearCoat(float Roughness, float  IO
     float R90 = 1.0;
     SrfInfo.Reflectance0  = float3(f0, f0, f0);
     SrfInfo.Reflectance90 = float3(R90, R90, R90);
+#if ENABLE_IRIDESCENCE
+    SrfInfo.IridescenceFresnel = float3(0.0, 0.0, 0.0);
+    SrfInfo.IridescenceFactor  = 0.0;
+#endif
 
     return SrfInfo;
 }
@@ -470,6 +558,11 @@ SurfaceReflectanceInfo GetSurfaceReflectanceClearCoat(float Roughness, float  IO
 struct BaseLayerShadingInfo
 {
     SurfaceReflectanceInfo Srf;
+
+#if ENABLE_SPECULAR
+    float3 SpecularColorFactor;
+    float  SpecularFactor;
+#endif
     
     float Metallic;
     
@@ -497,10 +590,7 @@ struct SheenShadingInfo
 
 struct IridescenceShadingInfo
 {
-    float  Factor;
-    float  Thickness;
-    float3 Fresnel;
-    float3 F0;
+    float Thickness;
 };
 
 struct AnisotropyShadingInfo
@@ -601,8 +691,8 @@ SurfaceLightingInfo GetDefaultSurfaceLightingInfo()
 void ApplyPunctualLight(in    SurfaceShadingInfo     Shading,
                         in    PBRLightAttribs        Light,
 #if ENABLE_SHEEN
-                        in    Texture2D              AlbedoScalingLUT,
-                        in    SamplerState           AlbedoScalingLUT_sampler,
+                        in    Texture2D              PreintegratedSheen,
+                        in    SamplerState           PreintegratedSheen_sampler,
 #endif 
 #if ENABLE_SHADOWS
                         in    Texture2DArray<float>  ShadowMap,
@@ -704,9 +794,13 @@ void ApplyPunctualLight(in    SurfaceShadingInfo     Shading,
         SrfLighting.Sheen.Punctual += ApplyDirectionalLightSheen(LightDirection, LightIntensity, Shading.Sheen.Color, Shading.Sheen.Roughness, Shading.BaseLayer.Normal, Shading.View);
     
         float MaxFactor = max(max(Shading.Sheen.Color.r, Shading.Sheen.Color.g), Shading.Sheen.Color.b);
+        float DirectionalAlbedoV = SamplePreintegratedSheenBRDF(
+            PreintegratedSheen, PreintegratedSheen_sampler, NdotV, Shading.Sheen.Roughness);
+        float DirectionalAlbedoL = SamplePreintegratedSheenBRDF(
+            PreintegratedSheen, PreintegratedSheen_sampler, NdotL, Shading.Sheen.Roughness);
         float AlbedoScaling =
-            min(1.0 - MaxFactor * AlbedoScalingLUT.Sample(AlbedoScalingLUT_sampler, float2(NdotV, Shading.Sheen.Roughness)).r,
-                1.0 - MaxFactor * AlbedoScalingLUT.Sample(AlbedoScalingLUT_sampler, float2(NdotL, Shading.Sheen.Roughness)).r);
+            min(1.0 - MaxFactor * DirectionalAlbedoV,
+                1.0 - MaxFactor * DirectionalAlbedoL);
         BasePunctual *= AlbedoScaling;
     }
 #endif
@@ -723,6 +817,7 @@ void ApplyPunctualLight(in    SurfaceShadingInfo     Shading,
 #if USE_IBL
 void ApplyIBL(in SurfaceShadingInfo Shading,
               in float              PrefilteredCubeLastMip,
+              in float2             EnvironmentRotation,
               in Texture2D          PreintegratedGGX,
               in SamplerState       PreintegratedGGX_sampler,
               in TextureCube        IrradianceMap,
@@ -730,21 +825,20 @@ void ApplyIBL(in SurfaceShadingInfo Shading,
               in TextureCube        PrefilteredEnvMap,
               in SamplerState       PrefilteredEnvMap_sampler,
 #   if ENABLE_SHEEN
-              in Texture2D    PreintegratedCharlie,
-              in SamplerState PreintegratedCharlie_sampler,
+              in Texture2D    PreintegratedSheen,
+              in SamplerState PreintegratedSheen_sampler,
+              in TextureCube  PrefilteredSheenEnvMap,
+              in SamplerState PrefilteredSheenEnvMap_sampler,
 #   endif
               inout SurfaceLightingInfo SrfLighting)
 {
     {
         IBLSamplingInfo IBLInfo = GetIBLSamplingInfo(
             Shading.BaseLayer.Srf, PreintegratedGGX, PreintegratedGGX_sampler,
-#           if ENABLE_IRIDESCENCE
-                Shading.Iridescence.Fresnel, Shading.Iridescence.Factor,
-#           endif
             Shading.BaseLayer.Normal, Shading.View);
 
         SrfLighting.Base.DiffuseIBL =
-            GetLambertianIBL(Shading.BaseLayer.Srf, IBLInfo, IrradianceMap, IrradianceMap_sampler);
+            GetLambertianIBL(Shading.BaseLayer.Srf, IBLInfo, EnvironmentRotation, IrradianceMap, IrradianceMap_sampler);
 #       if ENABLE_TRANSMISSION
         {
             SrfLighting.Base.DiffuseIBL *= 1.0 - Shading.Transmission;
@@ -767,15 +861,14 @@ void ApplyIBL(in SurfaceShadingInfo Shading,
 #       endif
 
         SrfLighting.Base.SpecularIBL =
-            GetSpecularIBL_GGX(Shading.BaseLayer.Srf, IBLInfo, PrefilteredEnvMap, PrefilteredEnvMap_sampler, PrefilteredCubeLastMip);
+            GetSpecularIBL_GGX(Shading.BaseLayer.Srf, IBLInfo, EnvironmentRotation, PrefilteredEnvMap, PrefilteredEnvMap_sampler, PrefilteredCubeLastMip);
     }
 #   if ENABLE_SHEEN
     {
-        // NOTE: to be accurate, we need to use another environment map here prefiltered with the Charlie BRDF.
         SrfLighting.Sheen.SpecularIBL =
-             GetSpecularIBL_Charlie(Shading.Sheen.Color, Shading.Sheen.Roughness, Shading.BaseLayer.Normal, Shading.View, PrefilteredCubeLastMip,
-                            PreintegratedCharlie, PreintegratedCharlie_sampler,
-                            PrefilteredEnvMap,    PrefilteredEnvMap_sampler);
+             GetSpecularIBL_Charlie(Shading.Sheen.Color, Shading.Sheen.Roughness, Shading.BaseLayer.Normal, Shading.View, EnvironmentRotation, PrefilteredCubeLastMip,
+                            PreintegratedSheen, PreintegratedSheen_sampler,
+                            PrefilteredSheenEnvMap, PrefilteredSheenEnvMap_sampler);
     }
 #   endif
 
@@ -786,7 +879,7 @@ void ApplyIBL(in SurfaceShadingInfo Shading,
             Shading.Clearcoat.Normal, Shading.View);
 
         SrfLighting.Clearcoat.SpecularIBL =
-            GetSpecularIBL_GGX(Shading.Clearcoat.Srf, IBLInfo, PrefilteredEnvMap, PrefilteredEnvMap_sampler, PrefilteredCubeLastMip);
+            GetSpecularIBL_GGX(Shading.Clearcoat.Srf, IBLInfo, EnvironmentRotation, PrefilteredEnvMap, PrefilteredEnvMap_sampler, PrefilteredCubeLastMip);
     }
 #   endif
 }
@@ -955,6 +1048,14 @@ float3 GetDebugColor(in SurfaceShadingInfo  Shading,
     {
         return Shading.Sheen.Roughness * float3(1.0, 1.0, 1.0);
     }
+#elif (DEBUG_VIEW == DEBUG_VIEW_SPECULAR_FACTOR && ENABLE_SPECULAR)
+    {
+        return Shading.BaseLayer.SpecularFactor * float3(1.0, 1.0, 1.0);
+    }
+#elif (DEBUG_VIEW == DEBUG_VIEW_SPECULAR_COLOR_FACTOR && ENABLE_SPECULAR)
+    {
+        return Shading.BaseLayer.SpecularColorFactor;
+    }
 #elif (DEBUG_VIEW == DEBUG_VIEW_ANISOTROPY_STRENGTH && ENABLE_ANISOTROPY)
     {
         return Shading.Anisotropy.Strength * float3(1.0, 1.0, 1.0);
@@ -965,11 +1066,11 @@ float3 GetDebugColor(in SurfaceShadingInfo  Shading,
     }
 #elif (DEBUG_VIEW == DEBUG_VIEW_IRIDESCENCE && ENABLE_IRIDESCENCE)
     {        
-        return Shading.Iridescence.Fresnel;
+        return Shading.BaseLayer.Srf.IridescenceFresnel;
     }
 #elif (DEBUG_VIEW == DEBUG_VIEW_IRIDESCENCE_FACTOR && ENABLE_IRIDESCENCE)
     {        
-        return Shading.Iridescence.Factor * float3(1.0, 1.0, 1.0);
+        return Shading.BaseLayer.Srf.IridescenceFactor * float3(1.0, 1.0, 1.0);
     }
 #elif (DEBUG_VIEW == DEBUG_VIEW_IRIDESCENCE_THICKNESS && ENABLE_IRIDESCENCE)
     {
